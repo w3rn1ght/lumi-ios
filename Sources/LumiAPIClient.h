@@ -38,8 +38,8 @@ extern NSString *const LumiAPIErrorDomain;
 /// Sends a chat message. Returns the decoded JSON response.
 - (void)sendMessage:(NSString *)text
           sessionID:(NSString *)sessionID
-             turnID:(NSString *)turnID
-             stepID:(NSString *)stepID
+             turnID:(nullable NSString *)turnID
+             stepID:(nullable NSString *)stepID
          completion:(LumiAPIRawCompletion)completion;
 
 /// Public Lumi web API (no auth required).
