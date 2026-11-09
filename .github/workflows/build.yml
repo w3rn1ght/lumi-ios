@@ -18,7 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Probe
-        run: python3 Tools/probe_native_api.py
+        run: |
+          python3 Tools/probe_native_api.py
+          python3 Tools/probe_validation.py
   build:
     name: Build .deb
     runs-on: macos-15
