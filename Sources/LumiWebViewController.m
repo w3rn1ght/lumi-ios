@@ -13,7 +13,8 @@
 static NSString *const kLumiHomeURLString = @"https://lumi.site/";
 static void *LumiProgressObservationContext = &LumiProgressObservationContext;
 
-@interface LumiWebViewController () <LumiWKUIDelegatePrivate,
+@interface LumiWebViewController () <WKNavigationDelegate,
+                                     LumiWKUIDelegatePrivate,
                                      UIGestureRecognizerDelegate,
                                      UIImagePickerControllerDelegate,
                                      UINavigationControllerDelegate,
