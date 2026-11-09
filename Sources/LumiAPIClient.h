@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 
+NS_ASSUME_NONNULL_BEGIN
+
 typedef void (^LumiAPICompletion)(id _Nullable result, NSError * _Nullable error);
 typedef void (^LumiAPIRawCompletion)(NSDictionary * _Nullable json, NSError * _Nullable error);
 
@@ -36,9 +38,9 @@ extern NSString *const LumiAPIErrorDomain;
 /// Sends a chat message. Returns the decoded JSON response.
 - (void)sendMessage:(NSString *)text
           sessionID:(NSString *)sessionID
-           turnID:(NSString *)turnID
-         stepID:(NSString *)stepID
-       completion:(LumiAPIRawCompletion)completion;
+             turnID:(NSString *)turnID
+             stepID:(NSString *)stepID
+         completion:(LumiAPIRawCompletion)completion;
 
 /// Public Lumi web API (no auth required).
 - (void)fetchCatalogWithCompletion:(LumiAPIRawCompletion)completion;
@@ -50,3 +52,5 @@ extern NSString *const LumiAPIErrorDomain;
                           completion:(void (^)(BOOL ok, NSString *message))completion;
 
 @end
+
+NS_ASSUME_NONNULL_END
