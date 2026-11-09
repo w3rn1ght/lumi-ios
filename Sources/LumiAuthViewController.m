@@ -3,7 +3,7 @@
 #import "LumiAppDelegate.h"
 #import "LumiTheme.h"
 
-@interface LumiAuthViewController ()
+@interface LumiAuthViewController () <UITextFieldDelegate>
 
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UITextField *emailField;
