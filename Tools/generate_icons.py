@@ -127,7 +127,10 @@ def write_png(path, width, height, rgba):
     for y in range(height):
         raw.append(0)
         raw.extend(rgba[y * stride : (y + 1) * stride])
+    write_png_prefiltered(path, width, height, raw)
 
+
+def write_png_prefiltered(path, width, height, raw):
     def chunk(tag, payload):
         return (
             struct.pack(">I", len(payload))
@@ -143,6 +146,79 @@ def write_png(path, width, height, rgba):
     png += chunk(b"IEND", b"")
     with open(path, "wb") as handle:
         handle.write(png)
+
+
+LAUNCH_SIZES = [
+    (320, 568, 2),
+    (375, 667, 2),
+    (414, 736, 3),
+    (375, 812, 3),
+    (414, 896, 2),
+    (414, 896, 3),
+    (768, 1024, 2),
+    (834, 1112, 2),
+    (834, 1194, 2),
+    (1024, 1366, 2),
+    (568, 320, 2),
+    (667, 375, 2),
+    (736, 414, 3),
+    (812, 375, 3),
+    (896, 414, 2),
+    (896, 414, 3),
+    (1024, 768, 2),
+    (1112, 834, 2),
+    (1194, 834, 2),
+    (1366, 1024, 2),
+]
+
+
+def launch_name(width, height):
+    return "Launch-%dx%d" % (width, height)
+
+
+def render_launch(width_pt, height_pt, scale):
+    width = width_pt * scale
+    height = height_pt * scale
+    logo_pt = min(140, max(96, int(min(width_pt, height_pt) * 0.30)))
+    logo_px = logo_pt * scale
+    logo = render(logo_px, transparent=True, samples=2)
+
+    x0 = (width - logo_px) // 2
+    y0 = (height - logo_px) // 2
+    background = bytes((DARK[0], DARK[1], DARK[2], 255))
+    solid_row = b"\x00" + background * width
+
+    raw = bytearray()
+    for y in range(height):
+        if y < y0 or y >= y0 + logo_px:
+            raw += solid_row
+            continue
+        row = bytearray(b"\x00")
+        row += background * x0
+        logo_y = y - y0
+        base = logo_y * logo_px * 4
+        for x in range(logo_px):
+            offset = base + x * 4
+            pixel = logo[offset : offset + 4]
+            alpha = pixel[3]
+            if alpha == 255:
+                row += pixel
+            elif alpha == 0:
+                row += background
+            else:
+                a = alpha / 255.0
+                row += bytes(
+                    (
+                        int(round(DARK[0] * (1.0 - a) + pixel[0] * a)),
+                        int(round(DARK[1] * (1.0 - a) + pixel[1] * a)),
+                        int(round(DARK[2] * (1.0 - a) + pixel[2] * a)),
+                        255,
+                    )
+                )
+        row += background * (width - x0 - logo_px)
+        raw += row
+
+    return width, height, raw
 
 
 def main():
@@ -180,6 +256,12 @@ def main():
         512,
         render(512, transparent=True, samples=2),
     )
+
+    for width_pt, height_pt, scale in LAUNCH_SIZES:
+        name = "%s@%dx.png" % (launch_name(width_pt, height_pt), scale)
+        print("generating", name, "(%dx%d)" % (width_pt * scale, height_pt * scale))
+        width, height, raw = render_launch(width_pt, height_pt, scale)
+        write_png_prefiltered(os.path.join(RESOURCES, name), width, height, raw)
 
 
 if __name__ == "__main__":

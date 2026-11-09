@@ -84,8 +84,7 @@ make package FINALPACKAGE=1
 .
 ├── Makefile                     # Theos application target, iOS 12.4 SDK, arm64
 ├── control                      # метаданные Debian-пакета
-├── Resources/                   # Info.plist, иконки, LaunchLogo
-├── Support/LaunchScreen.storyboard
+├── Resources/                   # Info.plist, иконки, launch images
 ├── Sources/
 │   ├── main.m
 │   ├── LumiApplication.{h,m}    # обработка shake

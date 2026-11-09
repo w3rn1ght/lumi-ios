@@ -1,6 +1,5 @@
 .theos/
 packages/
-Resources/LaunchScreen.storyboardc/
 *.deb
 .DS_Store
 __pycache__/
