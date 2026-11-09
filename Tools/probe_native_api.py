@@ -1,13 +1,12 @@
 """
-Диагностика нативного API Lumi (мобильный бэкенд).
-Запускается на GitHub Actions (macos-15), т.к. с локальной машины хост
-lumi-api.nexoragroup.dev сбрасывает TLS-соединение.
+Проверка нативного API Lumi в GitHub Actions.
+Хост lumi-api.nexoragroup.dev недоступен с локальной машины,
+поэтому запросы выполняются на раннере.
 
-Ничего не пишет: только коды ответов, набор полей и ошибочные сообщения.
+Внимание: успешный вход не проверяется, чтобы не использовать чужие аккаунты.
 """
 
 import json
-import ssl
 import urllib.error
 import urllib.request
 
@@ -15,7 +14,7 @@ BASE = "https://lumi-api.nexoragroup.dev"
 UA = "Lumi/1.0.0 (Android)"
 
 
-def call(method, path, body=None, headers=None):
+def call(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(
         BASE + path,
@@ -25,46 +24,43 @@ def call(method, path, body=None, headers=None):
             "User-Agent": UA,
             "Accept": "application/json",
             "Content-Type": "application/json",
-            **(headers or {}),
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=30, context=ssl.create_default_context()) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             payload = response.read()
             print(f"{method} {path} -> {response.status} ({len(payload)} bytes)")
-            print("  server:", response.headers.get("Server"))
-            for cookie in response.headers.get_all("Set-Cookie") or []:
-                print("  set-cookie:", cookie.split(";")[0])
             return response.status, payload
     except urllib.error.HTTPError as error:
         payload = error.read()
         print(f"{method} {path} -> {error.code}")
-        print("  body:", payload[:400])
+        print("  body:", payload[:300])
         return error.code, payload
     except Exception as error:  # noqa: BLE001
         print(f"{method} {path} -> ERROR {type(error).__name__}: {error}")
         return 0, b""
 
 
-status, body = call("GET", "/api/app/version-check/")
-if status == 200:
-    print("  keys:", sorted(json.loads(body).keys()))
+print("== invalid login (deterministic 401) ==")
+call("POST", "/api/users/login/", {"email": "probe-not-real@example.com", "password": "x"})
 
-# Invalid credentials should produce a deterministic, non-destructive error.
-for payload in (
-    {"email": "nonexistent-probe@example.com", "password": "x"},
-    {"email": "nonexistent-probe@example.com", "password": "x", "device": "probe"},
-):
-    status, body = call("POST", "/api/users/login/", payload)
-    try:
-        print("  keys:", sorted(json.loads(body).keys()))
-    except Exception:  # noqa: BLE001
-        pass
-
-# Unauthenticated private endpoints: we only care about status codes.
+print("\n== protected endpoints without token ==")
 for method, path in (
     ("GET", "/api/users/profile/"),
     ("GET", "/api/chat/sessions/"),
-    ("POST", "/api/users/token/refresh/"),
+    ("GET", "/api/chat/sessions/00000000-0000-0000-0000-000000000000/messages/"),
+    ("POST", "/api/chat/"),
 ):
     call(method, path, {} if method == "POST" else None)
+
+print("\n== public web API (catalog) ==")
+request = urllib.request.Request(
+    "https://api.lumi.site/public/characters?limit=2",
+    headers={"User-Agent": "Mozilla/5.0"},
+)
+try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+        body = json.loads(response.read())
+        print("public characters ->", response.status, "items:", len(body.get("items", [])))
+except Exception as error:  # noqa: BLE001
+    print("public characters -> ERROR", error)
