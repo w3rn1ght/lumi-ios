@@ -1,15 +1,18 @@
 """
-Проверка нативного API Lumi (используется мобильным приложением).
+Диагностика нативного API Lumi (мобильный бэкенд).
+Запускается на GitHub Actions (macos-15), т.к. с локальной машины хост
+lumi-api.nexoragroup.dev сбрасывает TLS-соединение.
 
-Запуск:  python Tools/probe_native_api.py
+Ничего не пишет: только коды ответов, набор полей и ошибочные сообщения.
 """
 
 import json
+import ssl
 import urllib.error
 import urllib.request
 
-UA = "Lumi/1.0.0 (Android)"
 BASE = "https://lumi-api.nexoragroup.dev"
+UA = "Lumi/1.0.0 (Android)"
 
 
 def call(method, path, body=None, headers=None):
@@ -20,26 +23,48 @@ def call(method, path, body=None, headers=None):
         method=method,
         headers={
             "User-Agent": UA,
-            "Content-Type": "application/json",
             "Accept": "application/json",
+            "Content-Type": "application/json",
             **(headers or {}),
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=25) as response:
-            print(method, path, "->", response.status)
-            print("  set-cookie:", response.headers.get_all("Set-Cookie"))
-            return response.status, response.read()
+        with urllib.request.urlopen(request, timeout=30, context=ssl.create_default_context()) as response:
+            payload = response.read()
+            print(f"{method} {path} -> {response.status} ({len(payload)} bytes)")
+            print("  server:", response.headers.get("Server"))
+            for cookie in response.headers.get_all("Set-Cookie") or []:
+                print("  set-cookie:", cookie.split(";")[0])
+            return response.status, payload
     except urllib.error.HTTPError as error:
-        print(method, path, "->", error.code)
-        print("  set-cookie:", error.headers.get_all("Set-Cookie"))
-        return error.code, error.read()
+        payload = error.read()
+        print(f"{method} {path} -> {error.code}")
+        print("  body:", payload[:400])
+        return error.code, payload
     except Exception as error:  # noqa: BLE001
-        print(method, path, "-> ERROR", error)
+        print(f"{method} {path} -> ERROR {type(error).__name__}: {error}")
         return 0, b""
 
 
-if __name__ == "__main__":
-    call("GET", "/api/app/version-check")
-    call("POST", "/api/users/login", {"email": "test@example.com", "password": "WrongPassword123"})
-    call("POST", "/api/users/register", {"email": "test@example.com", "password": "WrongPassword123"})
+status, body = call("GET", "/api/app/version-check/")
+if status == 200:
+    print("  keys:", sorted(json.loads(body).keys()))
+
+# Invalid credentials should produce a deterministic, non-destructive error.
+for payload in (
+    {"email": "nonexistent-probe@example.com", "password": "x"},
+    {"email": "nonexistent-probe@example.com", "password": "x", "device": "probe"},
+):
+    status, body = call("POST", "/api/users/login/", payload)
+    try:
+        print("  keys:", sorted(json.loads(body).keys()))
+    except Exception:  # noqa: BLE001
+        pass
+
+# Unauthenticated private endpoints: we only care about status codes.
+for method, path in (
+    ("GET", "/api/users/profile/"),
+    ("GET", "/api/chat/sessions/"),
+    ("POST", "/api/users/token/refresh/"),
+):
+    call(method, path, {} if method == "POST" else None)

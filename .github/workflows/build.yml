@@ -11,6 +11,14 @@ permissions:
   contents: write
 
 jobs:
+  api-probe:
+    name: Probe native API
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe
+        run: python3 Tools/probe_native_api.py
   build:
     name: Build .deb
     runs-on: macos-15
