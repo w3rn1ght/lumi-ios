@@ -1,5 +1,5 @@
 #import "LumiAppDelegate.h"
-#import "LumiWebViewController.h"
+#import "LumiMainViewController.h"
 
 @implementation LumiAppDelegate
 
@@ -10,9 +10,22 @@
                                                   green:0.043
                                                    blue:0.071
                                                   alpha:1.0];
-    self.window.rootViewController = [[LumiWebViewController alloc] init];
+    [self showRootForAuthState];
     [self.window makeKeyAndVisible];
     return YES;
+}
+
+- (void)showRootForAuthState {
+    self.window.rootViewController = [[LumiMainViewController alloc] init];
+    [self.window makeKeyAndVisible];
+}
+
+- (void)showAuth {
+    [self showRootForAuthState];
+}
+
+- (void)showMain {
+    [self showRootForAuthState];
 }
 
 @end

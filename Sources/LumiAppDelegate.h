@@ -4,4 +4,7 @@
 
 @property (nonatomic, strong) UIWindow *window;
 
+- (void)showAuth;
+- (void)showMain;
+
 @end
