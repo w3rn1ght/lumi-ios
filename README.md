@@ -94,6 +94,33 @@ make package FINALPACKAGE=1
 └── .github/workflows/build.yml  # CI-сборка .deb
 ```
 
+## Известная проблема: JS сайта не работает на iOS 12
+
+**Симптомы:** страница Lumi открывается, но кнопки «Войти», «Другой способ входа», «Отправить ссылку» и другие не реагируют.
+
+**Причина:** сайт `lumi.site` собирается Next.js/Turbopack с синтаксисом ES2020 — optional chaining (`?.`), nullish coalescing (`??`), logical assignment (`??=`). WebKit на iOS 12 эти конструкции **не поддерживает**, поэтому JS-бандлы не компилируются вообще: страница рендерится сервером, но все обработчики не навешиваются.
+
+Код `?.`/`??` встречается в базовых чанках:
+`/_next/static/chunks/0-ziqn1hxvph0.js`, `000h20vu-kzm0.js`, `03~yq9q893hmn.js`, `08qqf0rsi3oot.js`, `0zty4prxtfhel.js` и др.
+Сайт не отдаёт legacy/`nomodule`-сборку даже для старых User-Agent.
+
+**Почему это не чинится оболочкой:** `WKWebView` использует системный JavaScriptCore. Полифиллами нельзя добавить синтаксис, который парсер не понимает. Нужна либо transpile-сборка сайта на сервере, либо нативный клиент к API.
+
+**Варианты решения:**
+
+1. **iOS 13.4+** (лучше iOS 14+) — WebKit там поддерживает `?.` и `??`, сайт работает как есть.
+2. **Нативный клиент к API Lumi.** Часть API открыта и уже проверена:
+   - `GET https://api.lumi.site/public/characters/{id}` — карточка персонажа (имя, описание, первый месседж, теги);
+   - `GET https://api.lumi.site/public/characters?limit=N` — список новых персонажей;
+   - `GET https://api.lumi.site/public/stories?limit=N` — истории;
+   - `GET https://api.lumi.site/gallery/list?limit=N` — витрина;
+   - `GET https://api.lumi.site/public/characters/{id}` не требует авторизации.
+   Авторизация: `POST https://api.lumi.site/auth/login` (или `https://id.lumi.site/auth/login`) с `{"email","password"}`, но обязательна капча Yandex SmartCaptcha (`captcha_token`). Восстановление пароля: `POST /auth/forgot-password` **работает без капчи** и возвращает `{"ok":true}`.
+   Мобильное приложение использует другой приватный бэкенд `https://lumi-api.nexoragroup.dev/api/...` (`/api/users/login`, `/api/chat/sessions`), закрытый от сторонних клиентов.
+3. **Прокси с транспиляцией** (Babel/ESBuild) — технически возможно, но требует сервера и переписывания HTML/JS, поэтому в рамках этого `.deb` не реализовано.
+
+Если нужен именно полностью рабочий вход/чат на iOS 12 — потребуется отдельный нативный клиент к API Lumi. Это самостоятельный проект, потому что чат и авторизация закрыты капчей и приватным API.
+
 ## Ограничения
 
 - Это оболочка вокруг сайта, а не реверс-инжиниринг закрытого API Lumi. Если сайт изменится, интерфейс изменится вместе с ним.
