@@ -284,7 +284,7 @@
         return;
     }
     self.stateLabel.text = nil;
-    [self.chats removeAllObjects];
+    self.chats = @[];
     [self.tableView reloadData];
     [self showLoginPrompt];
 }
