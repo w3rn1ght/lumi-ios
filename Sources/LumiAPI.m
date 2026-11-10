@@ -170,6 +170,10 @@ static NSString *LumiEncodePath(NSString *path) {
 @property (nonatomic, strong, readwrite, nullable) NSString *accessToken;
 @property (nonatomic, strong, readwrite, nullable) NSString *refreshToken;
 @property (nonatomic, strong) NSURLSession *session;
+- (void)fetchCatalogDetailWithKind:(NSString *)kind
+                        identifier:(NSString *)identifier
+             includeFailureStatus:(BOOL)includeFailureStatus
+                        completion:(LumiAPICompletion)completion;
 @end
 
 @implementation LumiAPI

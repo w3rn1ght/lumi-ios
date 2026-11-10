@@ -26,6 +26,47 @@ static NSString *const kQuoteAttribute = @"LumiQuoteAttribute";
     return urls;
 }
 
++ (NSAttributedString *)attributedStringForText:(NSString *)text
+                                     textColor:(UIColor *)textColor
+                                      baseFont:(UIFont *)baseFont
+                             prefixCommandName:(nullable NSString *)prefixCommandName {
+    if (!prefixCommandName.length) {
+        return [self attributedStringForText:text textColor:textColor baseFont:baseFont];
+    }
+    NSMutableAttributedString *result = [[NSMutableAttributedString alloc] init];
+    NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
+    NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
+    style.lineSpacing = 2.5;
+    style.paragraphSpacing = 2.0;
+    UIFont *nameFont = [UIFont fontWithName:@"Georgia-Bold" size:baseFont.pointSize] ?: [UIFont boldSystemFontOfSize:baseFont.pointSize];
+    for (NSUInteger index = 0; index < lines.count; index++) {
+        NSString *line = lines[index];
+        if ([line hasPrefix:prefixCommandName]) {
+            NSString *rest = [line substringFromIndex:prefixCommandName.length];
+            NSAttributedString *name = [[NSAttributedString alloc] initWithString:prefixCommandName attributes:@{
+                NSFontAttributeName: nameFont,
+                NSForegroundColorAttributeName: [UIColor colorWithRed:0.55 green:0.36 blue:0.96 alpha:1.0],
+                NSParagraphStyleAttributeName: style,
+            }];
+            [result appendAttributedString:name];
+            if (rest.length) {
+                [result appendAttributedString:[self renderInlineText:rest textColor:textColor baseFont:baseFont]];
+            }
+        } else {
+            NSAttributedString *rendered = [self attributedStringForText:line textColor:textColor baseFont:baseFont];
+            [result appendAttributedString:rendered];
+        }
+        if (index + 1 < lines.count) {
+            [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:@{
+                NSFontAttributeName: baseFont,
+                NSForegroundColorAttributeName: textColor,
+                NSParagraphStyleAttributeName: style,
+            }]];
+        }
+    }
+    return result;
+}
+
 + (NSString *)stringByStrippingImageMarkers:(NSString *)text {
     if (!text.length) {
         return text ?: @"";

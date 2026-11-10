@@ -123,7 +123,8 @@
     }
     self.bubbleLabel.attributedText = [LumiRichTextRenderer attributedStringForText:visible
                                                                          textColor:textColor
-                                                                          baseFont:baseFont];
+                                                                          baseFont:baseFont
+                                                                 prefixCommandName:@"**"];
 
     self.bubble.backgroundColor = isUser ? LumiAccentColor() : LumiSurfaceColor();
     self.leadingConstraint.active = !isUser;

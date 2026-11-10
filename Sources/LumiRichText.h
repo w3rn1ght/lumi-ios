@@ -13,6 +13,13 @@ NS_ASSUME_NONNULL_BEGIN
                                      textColor:(UIColor *)textColor
                                       baseFont:(UIFont *)baseFont;
 
+/// Like +attributedStringForText:, but lines that start with `prefixCommandName`
+/// render the command name as a highlighted display-font prefix.
++ (NSAttributedString *)attributedStringForText:(nullable NSString *)text
+                                     textColor:(UIColor *)textColor
+                                      baseFont:(UIFont *)baseFont
+                             prefixCommandName:(nullable NSString *)prefixCommandName;
+
 /// Image URLs referenced by `[photo](url)` markers.
 + (NSArray<NSString *> *)imageURLsInText:(nullable NSString *)text;
 
