@@ -174,9 +174,6 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     self.segmentedControl.translatesAutoresizingMaskIntoConstraints = NO;
     self.segmentedControl.selectedSegmentIndex = 0;
     self.segmentedControl.tintColor = LumiAccentColor();
-    if (@available(iOS 13.0, *)) {
-        self.segmentedControl.selectedSegmentTintColor = LumiAccentColor();
-    }
     [self.segmentedControl addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
 
     self.searchBar = [[UISearchBar alloc] init];

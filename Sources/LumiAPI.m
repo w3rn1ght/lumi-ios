@@ -74,6 +74,13 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
 
 #pragma mark - API client
 
+@interface LumiChatStream (LumiPrivate)
+- (instancetype)initWithChatID:(NSString *)chatID
+                       content:(NSString *)content
+                  eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
+                    completion:(void (^)(NSError *))completion;
+@end
+
 @interface LumiAPI ()
 @property (nonatomic, strong, readwrite, nullable) LumiSessionUser *currentUser;
 @property (nonatomic, strong) NSURLSession *session;
