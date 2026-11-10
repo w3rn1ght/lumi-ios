@@ -434,7 +434,17 @@
         }
         return;
     }
-    if ([type isEqualToString:@"intro_message"] || [type isEqualToString:@"done"] || [type isEqualToString:@"variant_done"]) {
+    if ([type isEqualToString:@"intro_message"]) {
+        NSDictionary *message = payload[@"message"] ?: payload;
+        NSMutableDictionary *normalized = [self normalizedMessage:message];
+        if (normalized) {
+            [self.messages addObject:normalized];
+            [self.tableView reloadData];
+            [self scrollToBottomAnimated:YES];
+        }
+        return;
+    }
+    if ([type isEqualToString:@"done"] || [type isEqualToString:@"variant_done"]) {
         NSDictionary *message = payload[@"message"] ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (!normalized) {
@@ -448,6 +458,8 @@
             NSUInteger index = [self.messages indexOfObjectIdenticalTo:assistant];
             if (index != NSNotFound) {
                 [self.messages replaceObjectAtIndex:index withObject:normalized];
+            } else {
+                [self.messages addObject:normalized];
             }
         } else {
             [self.messages addObject:normalized];

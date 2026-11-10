@@ -187,12 +187,6 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     self.searchBar.backgroundColor = LumiSurfaceColor();
     self.searchBar.layer.cornerRadius = 12.0;
     self.searchBar.clipsToBounds = YES;
-    UITextField *searchField = [self.searchBar valueForKey:@"searchField"];
-    if ([searchField isKindOfClass:[UITextField class]]) {
-        searchField.textColor = LumiTextColor();
-        searchField.backgroundColor = UIColor.clearColor;
-        searchField.font = LumiFont(15.0, UIFontWeightRegular);
-    }
 
     self.chipsScrollView = [[UIScrollView alloc] init];
     self.chipsScrollView.translatesAutoresizingMaskIntoConstraints = NO;
