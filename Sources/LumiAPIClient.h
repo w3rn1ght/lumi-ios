@@ -26,6 +26,11 @@ extern NSString *const LumiAPIErrorDomain;
                  password:(NSString *)password
                completion:(LumiAPICompletion)completion;
 
+/// Exchanges a Google OpenID Connect ID token for Lumi JWTs.
+- (void)loginWithGoogleIDToken:(NSString *)idToken
+                         email:(nullable NSString *)email
+                    completion:(LumiAPICompletion)completion;
+
 - (void)refreshIfNeededWithCompletion:(void (^)(BOOL ok))completion;
 
 - (void)fetchProfileWithCompletion:(LumiAPIRawCompletion)completion;

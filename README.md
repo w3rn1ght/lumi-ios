@@ -4,7 +4,7 @@
 
 > Неофициальный клиент. Не связан с Lumi AI. Используйте на свой риск.
 
-## Статус 1.1.0 (beta)
+## Статус 1.2.0 (beta)
 
 **Проверено вручную и в CI:**
 
@@ -12,11 +12,14 @@
 - карточка персонажа `GET https://api.lumi.site/public/characters/{id}`;
 - восстановление пароля `POST https://api.lumi.site/auth/forgot-password` (без капчи, отвечает `{"ok":true}`);
 - нативный API отвечает и требует JWT: `POST /api/users/login/`, `GET /api/users/profile/`, `GET /api/chat/sessions/`, `POST /api/chat/`;
+- Google OAuth: авторизационный URL с iOS client ID, redirect URI `com.googleusercontent.apps.…:/oauth2callback` и `audience=<web client ID>` принимается Google (нет `redirect_uri_mismatch`);
+- эндпоинт `POST /api/users/social/google/` валидирует `id_token` (пустой → `token_required`, битый → `invalid_token`);
 - сборка `.deb` и подпись `ldid` в GitHub Actions.
 
 **Не проверено end-to-end (нет тестового аккаунта):**
 
 - успешный вход с реальной парой email/пароль;
+- успешный вход через Google (обмен кода на `id_token` и его приём бэкендом);
 - создание сессии персонажа;
 - отправка сообщения и получение ответа.
 
@@ -28,6 +31,7 @@
 - Публичный каталог персонажей без входа.
 - Карточка персонажа: аватар, описание, теги, первое сообщение.
 - Вход и регистрация по email/паролю через нативный API Lumi (JWT `access`/`refresh`).
+- Вход через Google: OAuth 2.0 Authorization Code + PKCE в `SFAuthenticationSession`, затем обмен `id_token` на JWT Lumi.
 - Автоматическое обновление access-токена.
 - Восстановление пароля по email (нативный запрос, без капчи).
 - Список чатов, история сообщений, отправка сообщения.
@@ -48,6 +52,7 @@
 |---|---|---|
 | Вход | `POST /api/users/login/` `{email,password}` | `https://lumi-api.nexoragroup.dev` |
 | Регистрация | `POST /api/users/register/` `{email,password}` | `https://lumi-api.nexoragroup.dev` |
+| Вход через Google | `POST /api/users/social/google/` `{provider:"google",id_token}` | `https://lumi-api.nexoragroup.dev` |
 | Обновление токена | `POST /api/users/token/refresh/` `{refresh}` | `https://lumi-api.nexoragroup.dev` |
 | Профиль | `GET /api/users/profile/` | `https://lumi-api.nexoragroup.dev` |
 | Список чатов | `GET /api/chat/sessions/?pinned=false` | `https://lumi-api.nexoragroup.dev` |
@@ -58,6 +63,17 @@
 | Сброс пароля | `POST /auth/forgot-password` `{email}` | `https://api.lumi.site` |
 
 Авторизованные запросы используют `Authorization: Bearer <access>`. Токены хранятся в `NSUserDefaults` (не в Keychain — осознанное упрощение MVP; для продакшена стоит перенести в Keychain).
+
+### Вход через Google
+
+Приложение повторяет схему официального Android-клиента и не тянет внешний GoogleSignIn SDK:
+
+1. `SFAuthenticationSession` открывает `https://accounts.google.com/o/oauth2/v2/auth` с iOS client ID, `response_type=code`, `scope=openid email profile`, PKCE (`S256`) и `audience=<web client ID>`.
+2. Google возвращает код по схеме `com.googleusercontent.apps.1032314291008-enums0tts15iutfse3tl0j2jdr8npi75:/oauth2callback`; схема зарегистрирована в `Info.plist` (`CFBundleURLTypes`).
+3. Код меняется на токены через `https://oauth2.googleapis.com/token` с тем же `audience`, чтобы `id_token` имел аудиторию веб-клиента Lumi.
+4. `id_token` отправляется в `POST /api/users/social/google/`; полученные `access`/`refresh` сохраняются как при обычном входе.
+
+Параметр `state` проверяется, отмена окна Google обрабатывается без ошибки. При ошибке бэкенда текст показывается на экране входа.
 
 ## Требования
 
@@ -73,7 +89,7 @@
    - через **Filza** — тап по `.deb` → Install;
    - по SSH:
      ```sh
-     dpkg -i com.w3rn1ght.lumi_1.1.0_iphoneos-arm.deb
+     dpkg -i com.w3rn1ght.lumi_1.2.0_iphoneos-arm.deb
      uicache -p /Applications/Lumi.app
      ```
 3. Если иконка не появилась — `uicache` или respring.
@@ -106,7 +122,7 @@ cd /path/to/lumi-ios
 make package FINALPACKAGE=1
 ```
 
-Готовый файл: `packages/com.w3rn1ght.lumi_1.1.0_iphoneos-arm.deb`.
+Готовый файл: `packages/com.w3rn1ght.lumi_1.2.0_iphoneos-arm.deb`.
 
 ## Структура
 
@@ -122,7 +138,8 @@ make package FINALPACKAGE=1
 │   ├── LumiCharacterViewController # карточка персонажа
 │   ├── LumiChatsViewController     # список чатов
 │   ├── LumiChatViewController      # чат
-│   ├── LumiAuthViewController      # вход/регистрация/сброс пароля
+│   ├── LumiAuthViewController      # вход/регистрация/Google/сброс пароля
+│   ├── LumiGoogleAuth.{h,m}        # Google OAuth 2.0 + PKCE (SFAuthenticationSession)
 │   ├── LumiProfileViewController   # профиль
 │   └── LumiImageLoader.{h,m}
 ├── layout/DEBIAN/                  # postinst / postrm (uicache)
@@ -131,10 +148,11 @@ make package FINALPACKAGE=1
 
 ## Ограничения
 
-- **Бета:** успешный вход и чат не проверены без тестового аккаунта.
+- **Бета:** успешный вход (email/пароль и Google) и чат не проверены без тестового аккаунта.
+- **Google OAuth без SDK:** используется `SFAuthenticationSession` и PKCE. Если бэкенд Lumi принимает только `id_token` с аудиторией iOS-клиента (а не веб-клиента), вход через Google вернёт ошибку — параметр `audience` можно поменять в `Sources/LumiGoogleAuth.m`.
 - **WebP:** аватары Lumi отдаются в WebP, а iOS 12 не умеет его декодировать. Сейчас показывается градиентный placeholder. Исправление — встроить libwebp или использовать прокси-конвертацию.
 - **Чат без WebSocket:** приложение отправляет `POST /api/chat/` и опрашивает историю. Если сервер стримит ответ только по WebSocket, ответ может не появиться.
-- **Нет OAuth:** только email/пароль; Google/Discord/Apple не реализованы.
+- **Нет входа через Apple и Discord.**
 - **Нет загрузки изображений и голоса.**
 - **Токены в NSUserDefaults**, а не в Keychain.
 - API может быть недоступен из некоторых сетей: `lumi-api.nexoragroup.dev` использует Cloudflare.

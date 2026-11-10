@@ -205,6 +205,24 @@ static NSString *const kUserEmailKey = @"lumi.user_email";
     }];
 }
 
+- (void)loginWithGoogleIDToken:(NSString *)idToken
+                         email:(nullable NSString *)email
+                    completion:(LumiAPICompletion)completion {
+    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
+                                                     path:@"/api/users/social/google/"
+                                                  baseURL:kNativeBaseURL
+                                                     body:@{@"provider": @"google", @"id_token": idToken}
+                                                needsAuth:NO];
+    [self performRequest:request completion:^(NSDictionary *json, NSError *error) {
+        if (error) {
+            completion(nil, error);
+            return;
+        }
+        [self storeTokens:json email:email ?: @""];
+        completion(json, nil);
+    }];
+}
+
 - (void)refreshIfNeededWithCompletion:(void (^)(BOOL))completion {
     if (!self.refreshToken.length) {
         completion(NO);

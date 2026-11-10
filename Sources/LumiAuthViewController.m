@@ -1,6 +1,7 @@
 #import "LumiAuthViewController.h"
 #import "LumiAPIClient.h"
 #import "LumiAppDelegate.h"
+#import "LumiGoogleAuth.h"
 #import "LumiTheme.h"
 
 @interface LumiAuthViewController () <UITextFieldDelegate>
@@ -10,6 +11,7 @@
 @property (nonatomic, strong) UITextField *passwordField;
 @property (nonatomic, strong) UIButton *primaryButton;
 @property (nonatomic, strong) UIButton *registerButton;
+@property (nonatomic, strong) UIButton *googleButton;
 @property (nonatomic, strong) UILabel *errorLabel;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, assign) BOOL registering;
@@ -80,6 +82,25 @@
     [self.registerButton.heightAnchor constraintEqualToConstant:50.0].active = YES;
     [self.registerButton addTarget:self action:@selector(toggleMode) forControlEvents:UIControlEventTouchUpInside];
 
+    UILabel *dividerLabel = [[UILabel alloc] init];
+    dividerLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    dividerLabel.text = @"или";
+    dividerLabel.textColor = LumiMutedColor();
+    dividerLabel.font = LumiFont(13.0, UIFontWeightRegular);
+    dividerLabel.textAlignment = NSTextAlignmentCenter;
+
+    self.googleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.googleButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.googleButton setTitle:@"Продолжить с Google" forState:UIControlStateNormal];
+    [self.googleButton setTitleColor:LumiTextColor() forState:UIControlStateNormal];
+    self.googleButton.titleLabel.font = LumiFont(16.0, UIFontWeightMedium);
+    self.googleButton.backgroundColor = LumiSurfaceColor();
+    self.googleButton.layer.cornerRadius = 12.0;
+    self.googleButton.layer.borderWidth = 1.0;
+    self.googleButton.layer.borderColor = LumiElevatedColor().CGColor;
+    [self.googleButton.heightAnchor constraintEqualToConstant:50.0].active = YES;
+    [self.googleButton addTarget:self action:@selector(googleTapped) forControlEvents:UIControlEventTouchUpInside];
+
     UIButton *forgotButton = [UIButton buttonWithType:UIButtonTypeSystem];
     forgotButton.translatesAutoresizingMaskIntoConstraints = NO;
     [forgotButton setTitle:@"Забыли пароль?" forState:UIControlStateNormal];
@@ -102,7 +123,7 @@
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
         logo, title, subtitle, self.emailField, self.passwordField, self.primaryButton,
-        self.registerButton, forgotButton, self.errorLabel
+        self.registerButton, dividerLabel, self.googleButton, forgotButton, self.errorLabel
     ]];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisVertical;
@@ -112,6 +133,8 @@
     [stack setCustomSpacing:8.0 afterView:self.emailField];
     [stack setCustomSpacing:20.0 afterView:self.passwordField];
     [stack setCustomSpacing:10.0 afterView:self.primaryButton];
+    [stack setCustomSpacing:18.0 afterView:self.registerButton];
+    [stack setCustomSpacing:10.0 afterView:dividerLabel];
     [content addSubview:stack];
 
     UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
@@ -156,6 +179,7 @@
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [[LumiGoogleAuth sharedAuth] cancel];
 }
 
 - (void)keyboardWillChange:(NSNotification *)notification {
@@ -213,6 +237,43 @@
     }
 }
 
+- (void)googleTapped {
+    [self.view endEditing:YES];
+    self.errorLabel.hidden = YES;
+    [self setLoading:YES];
+
+    __weak typeof(self) weakSelf = self;
+    [[LumiGoogleAuth sharedAuth] signInFromViewController:self
+                                               completion:^(NSString *idToken, NSString *email, NSError *error) {
+        __strong typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        if (error) {
+            [strongSelf setLoading:NO];
+            if (!([error.domain isEqualToString:LumiGoogleAuthErrorDomain] && error.code == LumiGoogleAuthErrorCancelled)) {
+                [strongSelf showError:error.localizedDescription];
+            }
+            return;
+        }
+        [[LumiAPIClient sharedClient] loginWithGoogleIDToken:idToken
+                                                       email:email
+                                                  completion:^(id result, NSError *apiError) {
+            [strongSelf setLoading:NO];
+            if (apiError) {
+                [strongSelf showError:apiError.localizedDescription];
+                return;
+            }
+            void (^done)(void) = strongSelf.onSuccess;
+            [strongSelf dismissViewControllerAnimated:YES completion:^{
+                if (done) {
+                    done();
+                }
+            }];
+        }];
+    }];
+}
+
 - (void)forgotTapped {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Восстановление пароля"
                                                                    message:@"Введите email, и мы отправим ссылку для сброса пароля."
@@ -246,10 +307,14 @@
         [self.spinner startAnimating];
         self.primaryButton.enabled = NO;
         self.primaryButton.alpha = 0.6;
+        self.googleButton.enabled = NO;
+        self.googleButton.alpha = 0.6;
     } else {
         [self.spinner stopAnimating];
         self.primaryButton.enabled = YES;
         self.primaryButton.alpha = 1.0;
+        self.googleButton.enabled = YES;
+        self.googleButton.alpha = 1.0;
     }
 }
 

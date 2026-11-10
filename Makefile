@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 APPLICATION_NAME = Lumi
 
 Lumi_FILES = $(wildcard Sources/*.m)
-Lumi_FRAMEWORKS = UIKit Foundation
+Lumi_FRAMEWORKS = UIKit Foundation SafariServices
 Lumi_CFLAGS = -fobjc-arc -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations
 Lumi_INSTALL_PATH = /Applications
 Lumi_RESOURCE_DIRS = Resources
