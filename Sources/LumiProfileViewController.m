@@ -79,7 +79,7 @@
 
     UILabel *version = [[UILabel alloc] init];
     version.translatesAutoresizingMaskIntoConstraints = NO;
-    version.text = @"Lumi 1.3.2 · нативный клиент";
+    version.text = @"Lumi 1.3.3 · нативный клиент";
     version.textColor = LumiMutedColor();
     version.font = LumiFont(12.0, UIFontWeightRegular);
     version.textAlignment = NSTextAlignmentCenter;
@@ -247,7 +247,12 @@
 }
 
 - (void)refreshCatalogTapped {
-    [[LumiCatalogStore sharedStore] forceRefresh];
+    LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    if (store.isShowingSyncError) {
+        [store retryFailedCharacterDetails];
+    } else {
+        [store forceRefresh];
+    }
     [self refreshCatalogLabel];
 }
 

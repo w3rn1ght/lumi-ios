@@ -24,25 +24,23 @@ extern NSString *const LumiAuthDidChangeNotification;
 + (instancetype)sharedClient;
 
 @property (nonatomic, strong, readonly, nullable) LumiSessionUser *currentUser;
+/// YES when a session marker, bearer token or session cookie is present.
+@property (nonatomic, assign, readonly) BOOL isAuthenticated;
 
-- (BOOL)isAuthenticated;
-- (BOOL)isCatalogAvailable;
-
-/// Verifies the stored cookies with GET /auth/me.
 - (void)refreshSessionWithCompletion:(void (^)(BOOL ok))completion;
 
 - (void)loginWithEmail:(NSString *)email
               password:(NSString *)password
             completion:(LumiAPICompletion)completion;
 
+/// Exchanges the one-time deep-link token from the OAuth flow for a session.
+- (void)exchangeAppToken:(NSString *)token completion:(void (^)(NSError * _Nullable error))completion;
+
 - (void)logout;
 
-/// Imports cookies captured from the embedded login browser.
+/// Persists cookies captured from another component (e.g. WKWebView).
 - (void)storeCookies:(NSArray<NSHTTPCookie *> *)cookies;
 - (NSArray<NSHTTPCookie *> *)lumiCookies;
-
-/// Exchanges the one-time deep-link token from the OAuth flow for session cookies.
-- (void)exchangeAppToken:(NSString *)token completion:(void (^)(NSError * _Nullable error))completion;
 
 #pragma mark - Catalog
 

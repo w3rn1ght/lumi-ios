@@ -5,7 +5,12 @@ NSString *const LumiCatalogDidUpdateNotification = @"LumiCatalogDidUpdateNotific
 
 static NSString *const kCatalogFileName = @"catalog-v2.json";
 static const NSTimeInterval kCatalogMaxAge = 12 * 60 * 60;
-static const NSUInteger kDetailConcurrency = 6;
+static const NSUInteger kDetailConcurrency = 12;
+
+typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
+    LumiCatalogSyncKindCharacter = 0,
+    LumiCatalogSyncKindStory = 1,
+};
 
 @interface LumiCatalogStore ()
 @property (nonatomic, copy, readwrite) NSArray<NSDictionary *> *characters;
@@ -22,13 +27,12 @@ static const NSUInteger kDetailConcurrency = 6;
 @property (nonatomic, assign, readwrite) NSUInteger syncTotalCount;
 @property (nonatomic, assign, readwrite) NSUInteger phaseCompletedCount;
 @property (nonatomic, assign, readwrite) NSUInteger phaseTotalCount;
+@property (nonatomic, assign, readwrite) NSUInteger syncFailedCount;
 @property (nonatomic, assign) NSUInteger totalStoryCount;
 @property (nonatomic, assign) NSUInteger syncedStoryCount;
 @property (nonatomic, strong) LumiAPI *api;
 @property (nonatomic, strong, nullable) NSDate *savedAt;
-@property (nonatomic, strong) dispatch_queue_t stateQueue;
 @property (nonatomic, assign) BOOL started;
-@property (nonatomic, assign) NSUInteger pendingCharacterDetailCount;
 @end
 
 @implementation LumiCatalogStore
@@ -50,7 +54,6 @@ static const NSUInteger kDetailConcurrency = 6;
         _stories = @[];
         _characterTags = @[];
         _storyTags = @[];
-        _stateQueue = dispatch_queue_create("com.w3rn1ght.lumi.catalog", DISPATCH_QUEUE_SERIAL);
         _syncStatus = nil;
         _syncPhase = nil;
         _syncProgress = 0.0;
@@ -60,8 +63,11 @@ static const NSUInteger kDetailConcurrency = 6;
 
 #pragma mark - Progress helpers
 
-- (NSString *)syncPercentString {
-    if (self.syncTotalCount == 0) {
+- (BOOL)isShowingSyncError {
+    return !self.isSyncing && self.syncStatus.length > 0;
+}
+
+- (NSString *)syncPercentString {    if (self.syncTotalCount == 0) {
         return self.isSyncing ? @"0%" : @"100%";
     }
     double ratio = (double)self.syncCompletedCount / (double)self.syncTotalCount;
@@ -90,6 +96,9 @@ static const NSUInteger kDetailConcurrency = 6;
 
 - (NSString *)syncDetailedDescription {
     if (!self.isSyncing) {
+        if (self.syncStatus.length) {
+            return self.syncStatus;
+        }
         return [NSString stringWithFormat:@"Каталог загружен · %lu персонажей · %lu историй",
                 (unsigned long)self.characters.count, (unsigned long)self.stories.count];
     }
@@ -97,9 +106,13 @@ static const NSUInteger kDetailConcurrency = 6;
     if (self.phaseTotalCount == 0) {
         return [NSString stringWithFormat:@"%@ · получение списка…", phase];
     }
-    return [NSString stringWithFormat:@"%@ · %@ · %lu / %lu",
-            phase, [self phasePercentString],
-            (unsigned long)self.phaseCompletedCount, (unsigned long)self.phaseTotalCount];
+    NSString *base = [NSString stringWithFormat:@"%@ · %@ · %lu / %lu",
+                      phase, [self phasePercentString],
+                      (unsigned long)self.phaseCompletedCount, (unsigned long)self.phaseTotalCount];
+    if (self.syncFailedCount > 0) {
+        base = [base stringByAppendingFormat:@"  ·  ошибок: %lu", (unsigned long)self.syncFailedCount];
+    }
+    return base;
 }
 
 - (double)phaseProgress {
@@ -244,23 +257,18 @@ static const NSUInteger kDetailConcurrency = 6;
     }
 }
 
+- (void)retryFailedCharacterDetails {
+    if (self.isSyncing) {
+        return;
+    }
+    [self syncCharacterDetailsOnly];
+}
+
 - (void)forceRefresh {
     if (self.isSyncing) {
         return;
     }
-    self.isSyncing = YES;
-    self.syncStatus = @"Загрузка каталога…";
-    self.syncedCharacterCount = 0;
-    self.totalCharacterCount = 0;
-    self.syncedStoryCount = 0;
-    self.totalStoryCount = 0;
-    self.syncPhase = @"Подготовка";
-    self.syncCompletedCount = 0;
-    self.syncTotalCount = 0;
-    self.phaseCompletedCount = 0;
-    self.phaseTotalCount = 0;
-    self.syncProgress = 0.0;
-    [self notifyUpdate];
+    [self startSyncWithPhase:@"Подготовка"];
     [self syncTags];
     [self syncCharacterIDs];
 }
@@ -281,25 +289,114 @@ static const NSUInteger kDetailConcurrency = 6;
     }];
 }
 
+- (NSArray<NSString *> *)identifiersFromItems:(NSArray *)items {
+    NSMutableArray<NSString *> *ids = [NSMutableArray arrayWithCapacity:items.count];
+    for (NSDictionary *item in items) {
+        if (![item isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+        id identifier = item[@"id"];
+        if ([identifier isKindOfClass:[NSString class]]) {
+            [ids addObject:identifier];
+        }
+    }
+    return ids;
+}
+
+- (void)failSyncWithError:(NSError *)error fallback:(NSString *)fallback {
+    self.isSyncing = NO;
+    self.syncPhase = nil;
+    NSString *message = error.localizedDescription.length ? error.localizedDescription : fallback;
+    self.syncStatus = message;
+    self.syncFailedCount = 1;
+    NSLog(@"[Lumi] catalog sync failed: %@", message);
+    [self notifyUpdate];
+}
+
+- (void)startSyncWithPhase:(NSString *)phase {
+    self.isSyncing = YES;
+    self.started = YES;
+    self.syncPhase = phase;
+    self.syncStatus = nil;
+    self.syncFailedCount = 0;
+    self.syncCompletedCount = 0;
+    self.syncTotalCount = 0;
+    self.phaseCompletedCount = 0;
+    self.phaseTotalCount = 0;
+    self.totalCharacterCount = 0;
+    self.totalStoryCount = 0;
+    self.syncedCharacterCount = 0;
+    self.syncedStoryCount = 0;
+    self.syncProgress = 0.0;
+    [self notifyUpdate];
+}
+
+- (NSArray<NSDictionary *> *)currentCharacterIDs {
+    NSMutableArray *ids = [NSMutableArray array];
+    for (NSDictionary *character in self.characters) {
+        if (character[@"id"]) {
+            [ids addObject:character[@"id"]];
+        }
+    }
+    return ids;
+}
+
+- (void)syncCharacterDetailsOnly {
+    [self startSyncWithPhase:@"Персонажи"];
+    NSMutableDictionary *known = [NSMutableDictionary dictionary];
+    for (NSDictionary *character in self.characters) {
+        id identifier = character[@"id"];
+        if ([identifier isKindOfClass:[NSString class]] && character[@"name"]) {
+            known[identifier] = character;
+        }
+    }
+    NSArray *ids = [self currentCharacterIDs];
+    NSMutableArray<NSString *> *missing = [NSMutableArray arrayWithCapacity:ids.count];
+    for (NSString *identifier in ids) {
+        if (!known[identifier]) {
+            [missing addObject:identifier];
+        }
+    }
+    NSLog(@"[Lumi] catalog: %lu characters, %lu missing details", (unsigned long)ids.count, (unsigned long)missing.count);
+    [self updateProgressWithPhase:@"Персонажи" phaseDone:known.count phaseTotal:ids.count];
+    [self recalculateProgress];
+    [self notifyUpdate];
+    if (!missing.count) {
+        [self finishSync];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    [self syncDetailsForIDs:missing
+                       kind:LumiCatalogSyncKindCharacter
+                alreadyDone:known.count
+               overallTotal:ids.count
+                 completion:^(NSUInteger failed) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        strongSelf.syncedCharacterCount = ids.count;
+        [strongSelf updateProgressWithPhase:@"Персонажи" phaseDone:ids.count phaseTotal:ids.count];
+        [strongSelf recalculateProgress];
+        if (failed > 0) {
+            [strongSelf failSyncWithError:nil
+                                 fallback:[NSString stringWithFormat:@"Не удалось загрузить %lu карточек персонажей. Потяните вниз, чтобы повторить.",
+                                           (unsigned long)failed]];
+            [strongSelf saveCache];
+            return;
+        }
+        [strongSelf finishSync];
+    }];
+}
+
 - (void)syncCharacterIDs {
     [self.api fetchCharacterIDsWithCompletion:^(id result, NSError *error) {
         if (![result isKindOfClass:[NSArray class]]) {
-            self.isSyncing = NO;
-            self.syncStatus = error.localizedDescription ?: @"Не удалось загрузить каталог";
-            self.syncPhase = nil;
-            [self notifyUpdate];
+            [self failSyncWithError:error fallback:@"Не удалось загрузить список персонажей"];
             return;
         }
-        NSArray<NSDictionary *> *items = result;
-        NSMutableArray<NSString *> *ids = [NSMutableArray arrayWithCapacity:items.count];
-        for (NSDictionary *item in items) {
-            id identifier = item[@"id"];
-            if ([identifier isKindOfClass:[NSString class]]) {
-                [ids addObject:identifier];
-            }
-        }
+        NSArray<NSString *> *ids = [self identifiersFromItems:result];
         self.totalCharacterCount = ids.count;
-        [self recalculateProgress];
         NSMutableDictionary *known = [NSMutableDictionary dictionary];
         for (NSDictionary *character in self.characters) {
             id identifier = character[@"id"];
@@ -308,68 +405,58 @@ static const NSUInteger kDetailConcurrency = 6;
             }
         }
         NSMutableArray<NSString *> *missing = [NSMutableArray array];
-        for (NSString *identifier in ids) {
-            if (!known[identifier]) {
-                [missing addObject:identifier];
-            }
-        }
-        NSLog(@"[Lumi] catalog: %lu ids, %lu missing details", (unsigned long)ids.count, (unsigned long)missing.count);
         NSMutableArray *merged = [NSMutableArray array];
         for (NSString *identifier in ids) {
-            NSDictionary *existing = known[identifier];
-            if (existing) {
-                [merged addObject:existing];
+            if (known[identifier]) {
+                [merged addObject:known[identifier]];
+            } else {
+                [missing addObject:identifier];
             }
         }
         if (merged.count) {
             self.characters = [self sortedCharacters:merged];
         }
         self.syncedCharacterCount = known.count;
-        [self updateProgressWithPhase:@"Персонажи" phaseDone:self.syncedCharacterCount phaseTotal:ids.count];
+        [self updateProgressWithPhase:@"Персонажи" phaseDone:known.count phaseTotal:ids.count];
+        [self recalculateProgress];
         [self notifyUpdate];
+        NSLog(@"[Lumi] catalog: %lu ids, %lu missing details", (unsigned long)ids.count, (unsigned long)missing.count);
 
         if (!missing.count) {
             [self syncStoryIDs];
             return;
         }
-        __block NSUInteger completed = 0;
-        NSUInteger total = missing.count;
-        NSUInteger alreadyLoaded = known.count;
-        NSUInteger overallTotal = ids.count;
-        dispatch_group_t group = dispatch_group_create();
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(kDetailConcurrency);
         __weak typeof(self) weakSelf = self;
-        for (NSString *identifier in missing) {
-            dispatch_group_enter(group);
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-                [weakSelf.api fetchCharacterWithID:identifier completion:^(id result, NSError *error) {
-                    if ([result isKindOfClass:[NSDictionary class]]) {
-                        [weakSelf addCharacterDetail:result];
-                    }
-                    dispatch_semaphore_signal(semaphore);
-                    completed++;
-                    if (completed % 5 == 0 || completed == total) {
-                        weakSelf.syncedCharacterCount = alreadyLoaded + completed;
-                        [weakSelf updateProgressWithPhase:@"Персонажи"
-                                               phaseDone:weakSelf.syncedCharacterCount
-                                              phaseTotal:overallTotal];
-                        [weakSelf recalculateProgress];
-                        [weakSelf notifyUpdate];
-                        if (completed % 150 == 0) {
-                            [weakSelf saveCache];
-                        }
-                    }
-                    dispatch_group_leave(group);
-                }];
-            });
-        }
-        dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-            weakSelf.syncedCharacterCount = overallTotal;
-            [weakSelf recalculateProgress];
-            [weakSelf saveCache];
-            [weakSelf syncStoryIDs];
-        });
+        [self syncDetailsForIDs:missing
+                           kind:LumiCatalogSyncKindCharacter
+                    alreadyDone:known.count
+                   overallTotal:ids.count
+                     completion:^(NSUInteger failed) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            if (failed > 0) {
+                NSLog(@"[Lumi] %lu character details failed", (unsigned long)failed);
+            }
+            if (missing.count > 0 && failed == missing.count) {
+                [strongSelf failSyncWithError:nil fallback:@"Не удалось загрузить карточки персонажей. Проверьте соединение."];
+                return;
+            }
+            strongSelf.syncedCharacterCount = ids.count;
+            [strongSelf updateProgressWithPhase:@"Персонажи" phaseDone:ids.count phaseTotal:ids.count];
+            [strongSelf recalculateProgress];
+            [strongSelf notifyUpdate];
+            [strongSelf saveCache];
+            if (failed > 0) {
+                // Partial success: keep what we have and let the user retry the rest.
+                [strongSelf failSyncWithError:nil
+                                     fallback:[NSString stringWithFormat:@"Не удалось загрузить %lu персонажей из %lu. Потяните вниз, чтобы повторить загрузку.",
+                                               (unsigned long)failed, (unsigned long)ids.count]];
+                return;
+            }
+            [strongSelf syncStoryIDs];
+        }];
     }];
 }
 
@@ -380,20 +467,13 @@ static const NSUInteger kDetailConcurrency = 6;
     [self.api fetchStoryIDsWithCompletion:^(id result, NSError *error) {
         if (![result isKindOfClass:[NSArray class]]) {
             self.isSyncing = NO;
-            self.syncStatus = nil;
             self.syncPhase = nil;
+            self.syncStatus = nil;
             [self saveCache];
             [self notifyUpdate];
             return;
         }
-        NSArray<NSDictionary *> *items = result;
-        NSMutableArray<NSString *> *ids = [NSMutableArray arrayWithCapacity:items.count];
-        for (NSDictionary *item in items) {
-            id identifier = item[@"id"];
-            if ([identifier isKindOfClass:[NSString class]]) {
-                [ids addObject:identifier];
-            }
-        }
+        NSArray<NSString *> *ids = [self identifiersFromItems:result];
         NSMutableDictionary *known = [NSMutableDictionary dictionary];
         for (NSDictionary *story in self.stories) {
             id identifier = story[@"id"];
@@ -413,63 +493,133 @@ static const NSUInteger kDetailConcurrency = 6;
         self.stories = [self sortedStories:merged];
         self.totalStoryCount = ids.count;
         self.syncedStoryCount = known.count;
-        [self updateProgressWithPhase:@"Истории" phaseDone:self.syncedStoryCount phaseTotal:ids.count];
+        [self updateProgressWithPhase:@"Истории" phaseDone:known.count phaseTotal:ids.count];
         [self recalculateProgress];
         [self notifyUpdate];
 
         if (!missing.count) {
-            self.isSyncing = NO;
-            self.syncStatus = nil;
-            self.syncPhase = nil;
-            [self saveCache];
-            [self notifyUpdate];
+            [self finishSync];
             return;
         }
-
-        __block NSUInteger completed = 0;
-        NSUInteger total = missing.count;
-        NSUInteger alreadyLoaded = known.count;
-        NSUInteger overallTotal = ids.count;
-        dispatch_group_t group = dispatch_group_create();
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(kDetailConcurrency);
         __weak typeof(self) weakSelf = self;
-        for (NSString *identifier in missing) {
-            dispatch_group_enter(group);
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-                [weakSelf.api fetchStoryWithID:identifier completion:^(id result, NSError *error) {
-                    if ([result isKindOfClass:[NSDictionary class]]) {
-                        [weakSelf addStoryDetail:result];
+        [self syncDetailsForIDs:missing
+                           kind:LumiCatalogSyncKindStory
+                    alreadyDone:known.count
+                   overallTotal:ids.count
+                     completion:^(NSUInteger failed) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            strongSelf.syncedStoryCount = ids.count;
+            [strongSelf updateProgressWithPhase:@"Истории" phaseDone:ids.count phaseTotal:ids.count];
+            [strongSelf recalculateProgress];
+            if (failed > 0) {
+                [strongSelf failSyncWithError:nil
+                                     fallback:[NSString stringWithFormat:@"Не удалось загрузить %lu историй из %lu. Потяните вниз, чтобы повторить загрузку.",
+                                               (unsigned long)failed, (unsigned long)ids.count]];
+                [strongSelf saveCache];
+                return;
+            }
+            [strongSelf finishSync];
+        }];
+    }];
+}
+
+- (void)finishSync {
+    self.isSyncing = NO;
+    self.syncPhase = nil;
+    self.syncStatus = nil;
+    [self saveCache];
+    [self notifyUpdate];
+    NSLog(@"[Lumi] catalog sync finished: %lu characters, %lu stories",
+          (unsigned long)self.characters.count, (unsigned long)self.stories.count);
+}
+
+/// Runs a fixed number of workers (no thread blocking) so 1000+ requests cannot
+/// starve NSURLSession's delegate queue.
+- (void)syncDetailsForIDs:(NSArray<NSString *> *)ids
+                     kind:(LumiCatalogSyncKind)kind
+              alreadyDone:(NSUInteger)alreadyDone
+             overallTotal:(NSUInteger)overallTotal
+               completion:(void (^)(NSUInteger failed))completion {
+    NSUInteger total = ids.count;
+    if (total == 0) {
+        completion(0);
+        return;
+    }
+    dispatch_queue_t scheduler = dispatch_queue_create("com.w3rn1ght.lumi.catalog.workers", DISPATCH_QUEUE_SERIAL);
+    __block NSUInteger nextIndex = 0;
+    __block NSUInteger completed = 0;
+    __block NSUInteger failed = 0;
+    __block NSUInteger inFlight = 0;
+    __block void (^pump)(void);
+    __weak typeof(self) weakSelf = self;
+    NSString *phase = kind == LumiCatalogSyncKindCharacter ? @"Персонажи" : @"Истории";
+    NSUInteger reportEvery = kind == LumiCatalogSyncKindCharacter ? 5 : 4;
+    NSUInteger saveEvery = kind == LumiCatalogSyncKindCharacter ? 150 : 100;
+    self.syncFailedCount = 0;
+
+    pump = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        while (inFlight < kDetailConcurrency && nextIndex < total) {
+            NSString *identifier = ids[nextIndex];
+            nextIndex += 1;
+            inFlight += 1;
+            LumiAPICompletion handler = ^(id result, NSError *error) {
+                BOOL ok = [result isKindOfClass:[NSDictionary class]];
+                if (ok) {
+                    if (kind == LumiCatalogSyncKindCharacter) {
+                        [strongSelf addCharacterDetail:result];
+                    } else {
+                        [strongSelf addStoryDetail:result];
                     }
-                    dispatch_semaphore_signal(semaphore);
-                    completed++;
-                    if (completed % 4 == 0 || completed == total) {
-                        weakSelf.syncedStoryCount = alreadyLoaded + completed;
-                        [weakSelf updateProgressWithPhase:@"Истории"
-                                               phaseDone:weakSelf.syncedStoryCount
-                                              phaseTotal:overallTotal];
-                        [weakSelf recalculateProgress];
-                        [weakSelf notifyUpdate];
-                        if (completed % 100 == 0) {
-                            [weakSelf saveCache];
+                }
+                dispatch_async(scheduler, ^{
+                    completed += 1;
+                    if (!ok) {
+                        failed += 1;
+                    }
+                    inFlight -= 1;
+                    NSUInteger done = alreadyDone + completed;
+                    if (completed % reportEvery == 0 || completed == total) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (kind == LumiCatalogSyncKindCharacter) {
+                                strongSelf.syncedCharacterCount = done;
+                            } else {
+                                strongSelf.syncedStoryCount = done;
+                            }
+                            strongSelf.syncFailedCount = failed;
+                            [strongSelf updateProgressWithPhase:phase phaseDone:done phaseTotal:overallTotal];
+                            [strongSelf recalculateProgress];
+                            [strongSelf notifyUpdate];
+                        });
+                        if (completed % saveEvery == 0) {
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                [strongSelf saveCache];
+                            });
                         }
                     }
-                    dispatch_group_leave(group);
-                }];
-            });
+                    if (completed == total) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            completion(failed);
+                        });
+                        return;
+                    }
+                    pump();
+                });
+            };
+            if (kind == LumiCatalogSyncKindCharacter) {
+                [strongSelf.api fetchCharacterWithID:identifier completion:handler];
+            } else {
+                [strongSelf.api fetchStoryWithID:identifier completion:handler];
+            }
         }
-        dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-            weakSelf.syncedStoryCount = overallTotal;
-            [weakSelf recalculateProgress];
-            weakSelf.isSyncing = NO;
-            weakSelf.syncStatus = nil;
-            weakSelf.syncPhase = nil;
-            [weakSelf saveCache];
-            [weakSelf notifyUpdate];
-            NSLog(@"[Lumi] catalog sync finished: %lu characters, %lu stories",
-                  (unsigned long)weakSelf.characters.count, (unsigned long)weakSelf.stories.count);
-        });
-    }];
+    };
+    dispatch_async(scheduler, pump);
 }
 
 #pragma mark - Detail handling
@@ -497,22 +647,20 @@ static const NSUInteger kDetailConcurrency = 6;
     if (detail[@"owner"][@"username"]) {
         entry[@"owner"] = @{@"username": detail[@"owner"][@"username"]};
     }
-    dispatch_sync(self.stateQueue, ^{
-        NSMutableArray *characters = [self.characters mutableCopy] ?: [NSMutableArray array];
-        NSUInteger existingIndex = NSNotFound;
-        for (NSUInteger index = 0; index < characters.count; index++) {
-            if ([characters[index][@"id"] isEqual:identifier]) {
-                existingIndex = index;
-                break;
-            }
+    NSMutableArray *characters = [self.characters mutableCopy] ?: [NSMutableArray array];
+    NSUInteger existingIndex = NSNotFound;
+    for (NSUInteger index = 0; index < characters.count; index++) {
+        if ([characters[index][@"id"] isEqual:identifier]) {
+            existingIndex = index;
+            break;
         }
-        if (existingIndex != NSNotFound) {
-            [characters replaceObjectAtIndex:existingIndex withObject:entry];
-        } else {
-            [characters addObject:entry];
-        }
-        self.characters = characters;
-    });
+    }
+    if (existingIndex != NSNotFound) {
+        [characters replaceObjectAtIndex:existingIndex withObject:entry];
+    } else {
+        [characters addObject:entry];
+    }
+    self.characters = characters;
 }
 
 - (void)addStoryDetail:(NSDictionary *)detail {
@@ -564,22 +712,20 @@ static const NSUInteger kDetailConcurrency = 6;
     if ([detail[@"owner"] isKindOfClass:[NSDictionary class]] && detail[@"owner"][@"username"]) {
         entry[@"owner"] = @{@"username": detail[@"owner"][@"username"]};
     }
-    dispatch_sync(self.stateQueue, ^{
-        NSMutableArray *stories = [self.stories mutableCopy] ?: [NSMutableArray array];
-        NSUInteger existingIndex = NSNotFound;
-        for (NSUInteger index = 0; index < stories.count; index++) {
-            if ([stories[index][@"id"] isEqual:identifier]) {
-                existingIndex = index;
-                break;
-            }
+    NSMutableArray *stories = [self.stories mutableCopy] ?: [NSMutableArray array];
+    NSUInteger existingIndex = NSNotFound;
+    for (NSUInteger index = 0; index < stories.count; index++) {
+        if ([stories[index][@"id"] isEqual:identifier]) {
+            existingIndex = index;
+            break;
         }
-        if (existingIndex != NSNotFound) {
-            [stories replaceObjectAtIndex:existingIndex withObject:entry];
-        } else {
-            [stories addObject:entry];
-        }
-        self.stories = stories;
-    });
+    }
+    if (existingIndex != NSNotFound) {
+        [stories replaceObjectAtIndex:existingIndex withObject:entry];
+    } else {
+        [stories addObject:entry];
+    }
+    self.stories = stories;
 }
 
 - (NSArray *)sortedCharacters:(NSArray *)characters {

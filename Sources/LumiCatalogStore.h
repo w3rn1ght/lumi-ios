@@ -27,6 +27,8 @@ extern NSString *const LumiCatalogDidUpdateNotification;
 /// Completed/total for the current phase only.
 @property (nonatomic, assign, readonly) NSUInteger phaseCompletedCount;
 @property (nonatomic, assign, readonly) NSUInteger phaseTotalCount;
+/// Details that failed to load in the current phase (shown in the status line).
+@property (nonatomic, assign, readonly) NSUInteger syncFailedCount;
 /// Percent string for the whole sync, e.g. "37%".
 - (NSString *)syncPercentString;
 /// Percent string for the current phase, e.g. "12%".
@@ -36,6 +38,8 @@ extern NSString *const LumiCatalogDidUpdateNotification;
 /// "#1 · Персонажи · 37% · 512 / 1380"
 - (NSString *)syncDetailedDescription;
 
+/// YES when the last sync ended with an error message the user should see.
+@property (nonatomic, assign, readonly) BOOL isShowingSyncError;
 /// Ordered genre chips (Все first, then popular genres).
 + (NSArray<NSString *> *)characterGenres;
 + (NSArray<NSString *> *)storyGenres;
@@ -44,6 +48,8 @@ extern NSString *const LumiCatalogDidUpdateNotification;
 - (void)startIfNeeded;
 - (void)forceRefresh;
 - (void)refreshInBackgroundIfStale;
+/// Re-downloads only the cards that could not be loaded before.
+- (void)retryFailedCharacterDetails;
 
 - (NSArray<NSDictionary *> *)charactersMatchingQuery:(nullable NSString *)query tag:(nullable NSString *)tag;
 - (NSArray<NSDictionary *> *)storiesMatchingQuery:(nullable NSString *)query tag:(nullable NSString *)tag;

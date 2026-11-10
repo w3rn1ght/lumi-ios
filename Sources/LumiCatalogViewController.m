@@ -338,11 +338,21 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
 }
 
 - (void)refreshPulled {
-    [[LumiCatalogStore sharedStore] forceRefresh];
+    LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    if (store.isSyncing) {
+        [self reloadItems];
+        return;
+    }
+    if (store.isShowingSyncError) {
+        [store retryFailedCharacterDetails];
+    } else {
+        [store forceRefresh];
+    }
     [self reloadItems];
 }
 
-- (void)chipTapped:(UIButton *)sender {    NSArray<NSString *> *genres = self.mode == LumiCatalogModeStories
+- (void)chipTapped:(UIButton *)sender {
+    NSArray<NSString *> *genres = self.mode == LumiCatalogModeStories
         ? [LumiCatalogStore storyGenres]
         : [LumiCatalogStore characterGenres];
     if (sender.tag < 0 || sender.tag >= (NSInteger)genres.count) {
@@ -372,18 +382,25 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     NSString *status = nil;
     if (syncing) {
         self.progressView.hidden = NO;
+        self.progressView.progressTintColor = LumiAccentColor();
         [self.progressView setProgress:(float)self.store.phaseProgress animated:YES];
         status = [self.store syncDetailedDescription];
+        self.statusLabel.textColor = LumiMutedColor();
         [self.spinner startAnimating];
     } else {
         self.progressView.hidden = YES;
         [self.progressView setProgress:0.0 animated:NO];
         [self.spinner stopAnimating];
-        if (!self.items.count) {
+        if (self.store.isShowingSyncError) {
+            status = [self.store syncDetailedDescription];
+            self.statusLabel.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.45 alpha:1.0];
+        } else if (!self.items.count) {
+            self.statusLabel.textColor = LumiMutedColor();
             status = self.store.characters.count
                 ? @"Ничего не найдено. Попробуйте другой запрос или жанр."
                 : @"Каталог пуст. Потяните вниз, чтобы повторить загрузку.";
         } else {
+            self.statusLabel.textColor = LumiMutedColor();
             status = [NSString stringWithFormat:@"%lu %@ · каталог загружен (%lu / %lu)",
                       (unsigned long)self.items.count,
                       self.mode == LumiCatalogModeStories ? @"историй" : @"персонажей",

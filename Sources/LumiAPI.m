@@ -9,6 +9,9 @@ static NSString *const kAPIBaseURL = @"https://api.lumi.site";
 static NSString *const kAuthBaseURL = @"https://id.lumi.site";
 static NSString *const kWebOrigin = @"https://lumi.site";
 static NSString *const kUserCacheKey = @"lumi.cached_user";
+static NSString *const kTokenKey = @"lumi.bearer_token";
+static NSString *const kRefreshKey = @"lumi.refresh_token";
+static NSString *const kSessionMarkerKey = @"lumi.session_active";
 
 static NSError *LumiError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:LumiAPIErrorDomain
@@ -29,16 +32,88 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
                 @"validation_error": @"Проверьте введённые данные",
                 @"invalid_credentials": @"Неверный email или пароль",
                 @"email_not_confirmed": @"Подтвердите email — письмо уже отправлено",
-                @"captcha_required": @"Требуется проверка капчи. Войдите через браузер.",
+                @"captcha_failed": @"Нужна проверка капчи — войдите через провайдера",
                 @"Unauthorized": @"Нужно войти в аккаунт",
                 @"forbidden_origin": @"Сервер отклонил запрос",
                 @"rate_limited": @"Слишком много запросов, попробуйте позже",
+                @"app_token_invalid": @"Ссылка входа истекла. Попробуйте снова.",
             };
             return known[error] ?: [error capitalizedString];
+        }
+        id detail = dictionary[@"detail"];
+        if ([detail isKindOfClass:[NSString class]] && [detail length]) {
+            return detail;
         }
     }
     return fallback;
 }
+
+static BOOL LumiIsSessionCookie(NSHTTPCookie *cookie) {
+    if (![cookie.domain containsString:@"lumi.site"]) {
+        return NO;
+    }
+    return [cookie.name isEqualToString:@"lumi_access_token"] ||
+           [cookie.name isEqualToString:@"lumi_refresh_token"];
+}
+
+#pragma mark - Secure store
+
+@implementation LumiSecureStore
+
++ (NSUserDefaults *)defaults {
+    return [NSUserDefaults standardUserDefaults];
+}
+
++ (void)setObject:(id)object forKey:(NSString *)key {
+    NSUserDefaults *defaults = [self defaults];
+    if (object) {
+        [defaults setObject:object forKey:key];
+    } else {
+        [defaults removeObjectForKey:key];
+    }
+    [defaults synchronize];
+}
+
++ (id)objectForKey:(NSString *)key {
+    return [[self defaults] objectForKey:key];
+}
+
++ (BOOL)hasSessionMaterial {
+    if ([[self defaults] boolForKey:kSessionMarkerKey]) {
+        return YES;
+    }
+    if ([[self defaults] stringForKey:kTokenKey].length) {
+        return YES;
+    }
+    for (NSHTTPCookie *cookie in [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookies]) {
+        if (LumiIsSessionCookie(cookie)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
++ (void)markSessionActive:(BOOL)active {
+    [[self defaults] setBool:active forKey:kSessionMarkerKey];
+    [[self defaults] synchronize];
+}
+
++ (void)clearSession {
+    NSUserDefaults *defaults = [self defaults];
+    [defaults removeObjectForKey:kTokenKey];
+    [defaults removeObjectForKey:kRefreshKey];
+    [defaults removeObjectForKey:kUserCacheKey];
+    [defaults removeObjectForKey:kSessionMarkerKey];
+    [defaults synchronize];
+    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    for (NSHTTPCookie *cookie in [storage cookies]) {
+        if (LumiIsSessionCookie(cookie)) {
+            [storage deleteCookie:cookie];
+        }
+    }
+}
+
+@end
 
 #pragma mark - User
 
@@ -72,6 +147,15 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
 
 @end
 
+#pragma mark - Path encoding
+
+static NSString *LumiEncodePath(NSString *path) {
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/?&=+,:%"];
+    NSString *encoded = [path stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+    return encoded ?: path;
+}
+
 #pragma mark - API client
 
 @interface LumiChatStream (LumiPrivate)
@@ -83,6 +167,8 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
 
 @interface LumiAPI ()
 @property (nonatomic, strong, readwrite, nullable) LumiSessionUser *currentUser;
+@property (nonatomic, strong, readwrite, nullable) NSString *accessToken;
+@property (nonatomic, strong, readwrite, nullable) NSString *refreshToken;
 @property (nonatomic, strong) NSURLSession *session;
 @end
 
@@ -101,11 +187,12 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
     self = [super init];
     if (self) {
         NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
-        configuration.timeoutIntervalForRequest = 30.0;
-        configuration.timeoutIntervalForResource = 60.0;
+        configuration.timeoutIntervalForRequest = 20.0;
+        configuration.timeoutIntervalForResource = 40.0;
         configuration.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
         configuration.HTTPShouldSetCookies = YES;
         configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        configuration.HTTPMaximumConnectionsPerHost = 4;
         configuration.HTTPAdditionalHeaders = @{
             @"Accept": @"application/json",
             @"Accept-Language": @"ru,en;q=0.8",
@@ -116,8 +203,10 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
         };
         _session = [NSURLSession sessionWithConfiguration:configuration];
 
-        NSDictionary *cached = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kUserCacheKey];
-        if (cached) {
+        _accessToken = [LumiSecureStore objectForKey:kTokenKey];
+        _refreshToken = [LumiSecureStore objectForKey:kRefreshKey];
+        NSDictionary *cached = [LumiSecureStore objectForKey:kUserCacheKey];
+        if ([cached isKindOfClass:[NSDictionary class]]) {
             _currentUser = [LumiSessionUser userFromJSON:cached];
         }
     }
@@ -125,15 +214,7 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
 }
 
 - (BOOL)isAuthenticated {
-    return self.currentUser != nil || [self hasSessionCookies];
-}
-
-- (BOOL)isCatalogAvailable {
-    return YES;
-}
-
-- (BOOL)hasSessionCookies {
-    return [self lumiCookies].count > 0;
+    return [LumiSecureStore hasSessionMaterial];
 }
 
 - (NSArray<NSHTTPCookie *> *)lumiCookies {
@@ -146,6 +227,21 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
     return result;
 }
 
+- (void)syncCookiesFromSharedStorage {
+    NSArray *cookies = [self lumiCookies];
+    BOOL hasSession = NO;
+    for (NSHTTPCookie *cookie in cookies) {
+        if (LumiIsSessionCookie(cookie)) {
+            hasSession = YES;
+            break;
+        }
+    }
+    if (hasSession) {
+        [LumiSecureStore markSessionActive:YES];
+    }
+    NSLog(@"[Lumi] cookies=%lu session=%d", (unsigned long)cookies.count, hasSession);
+}
+
 - (void)storeCookies:(NSArray<NSHTTPCookie *> *)cookies {
     NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     NSInteger stored = 0;
@@ -154,9 +250,39 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
             continue;
         }
         [storage setCookie:cookie];
+        if (LumiIsSessionCookie(cookie)) {
+            [LumiSecureStore markSessionActive:YES];
+        }
         stored++;
     }
     NSLog(@"[Lumi] imported %ld cookies", (long)stored);
+}
+
+- (void)captureTokensFromPayload:(id)payload {
+    if (![payload isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+    NSDictionary *dictionary = payload;
+    id access = dictionary[@"access"];
+    if (![access isKindOfClass:[NSString class]]) {
+        access = dictionary[@"access_token"];
+    }
+    if (![access isKindOfClass:[NSString class]]) {
+        access = dictionary[@"token"];
+    }
+    if ([access isKindOfClass:[NSString class]] && [access length] > 10) {
+        self.accessToken = access;
+        [LumiSecureStore setObject:access forKey:kTokenKey];
+        [LumiSecureStore markSessionActive:YES];
+    }
+    id refresh = dictionary[@"refresh"];
+    if (![refresh isKindOfClass:[NSString class]]) {
+        refresh = dictionary[@"refresh_token"];
+    }
+    if ([refresh isKindOfClass:[NSString class]] && [refresh length] > 10) {
+        self.refreshToken = refresh;
+        [LumiSecureStore setObject:refresh forKey:kRefreshKey];
+    }
 }
 
 - (void)setCurrentUserJSON:(NSDictionary *)json {
@@ -170,8 +296,8 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
             cleaned[key] = value;
         }
     }
-    [[NSUserDefaults standardUserDefaults] setObject:cleaned forKey:kUserCacheKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    [LumiSecureStore setObject:cleaned forKey:kUserCacheKey];
+    [LumiSecureStore markSessionActive:YES];
     self.currentUser = [LumiSessionUser userFromJSON:cleaned];
 }
 
@@ -180,14 +306,18 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
 - (NSMutableURLRequest *)requestWithMethod:(NSString *)method
                                       path:(NSString *)path
                                    baseURL:(NSString *)baseURL
-                                      body:(nullable id)body
+                                      body:(id)body
                                    timeout:(NSTimeInterval)timeout {
-    NSURL *url = [NSURL URLWithString:[baseURL stringByAppendingString:path]];
+    NSString *full = [baseURL stringByAppendingString:LumiEncodePath(path)];
+    NSURL *url = [NSURL URLWithString:full];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.HTTPMethod = method;
     request.timeoutInterval = timeout;
     [request setValue:kWebOrigin forHTTPHeaderField:@"Origin"];
     [request setValue:[kWebOrigin stringByAppendingString:@"/"] forHTTPHeaderField:@"Referer"];
+    if (self.accessToken.length) {
+        [request setValue:[@"Bearer " stringByAppendingString:self.accessToken] forHTTPHeaderField:@"Authorization"];
+    }
     if (body) {
         request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:NULL];
         [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
@@ -204,27 +334,28 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
         if (data.length) {
             json = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
         }
+        NSInteger status = [http isKindOfClass:[NSHTTPURLResponse class]] ? http.statusCode : 0;
+        NSString *path = request.URL.path ?: @"";
+        NSLog(@"[Lumi] %@ %@ -> %ld %@", request.HTTPMethod, path, (long)status,
+              error ? error.localizedDescription : @"");
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) {
-                if (error.code == NSURLErrorCancelled) {
-                    return;
-                }
                 completion(nil, error);
                 return;
             }
-            if (http.statusCode >= 200 && http.statusCode < 300) {
+            if (status >= 200 && status < 300) {
+                [self captureTokensFromPayload:json];
                 completion(json ?: @{}, nil);
                 return;
             }
-            if (http.statusCode == 401) {
+            if (status == 401) {
+                [LumiSecureStore markSessionActive:NO];
                 [[NSNotificationCenter defaultCenter] postNotificationName:LumiAPIDidUnauthorizedNotification
                                                                     object:nil];
             }
             NSString *message = LumiMessageFromPayload(json,
-                                                       [NSString stringWithFormat:@"Ошибка сервера (%ld)",
-                                                        (long)http.statusCode]);
-            NSError *apiError = LumiError(http.statusCode, message);
-            completion(json, apiError);
+                                                       [NSString stringWithFormat:@"Ошибка сервера (%ld)", (long)status]);
+            completion(json, LumiError(status, message));
         });
     }];
     [task resume];
@@ -233,6 +364,7 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
 #pragma mark - Session
 
 - (void)refreshSessionWithCompletion:(void (^)(BOOL))completion {
+    [self syncCookiesFromSharedStorage];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                      path:@"/auth/me"
                                                   baseURL:kAPIBaseURL
@@ -247,7 +379,7 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
             return;
         }
         if (error.code == 401) {
-            self.currentUser = nil;
+            [LumiSecureStore markSessionActive:NO];
         }
         completion(NO);
     }];
@@ -285,13 +417,7 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
                                                   timeout:30.0];
     [self performRequest:request completion:^(id result, NSError *error) {
         if (error) {
-            NSString *message = error.localizedDescription;
-            if ([message containsString:@"app_token_invalid"] || [message containsString:@"истёк"]) {
-                message = @"Ссылка входа истекла. Попробуйте снова.";
-            }
-            completion(error.code == 401 ? error : [NSError errorWithDomain:LumiAPIErrorDomain
-                                                                      code:error.code
-                                                                  userInfo:@{NSLocalizedDescriptionKey: message}]);
+            completion(error);
             return;
         }
         NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
@@ -299,89 +425,116 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
         if ([user isKindOfClass:[NSDictionary class]]) {
             [self setCurrentUserJSON:user];
         }
+        [self syncCookiesFromSharedStorage];
         completion(nil);
     }];
 }
 
 - (void)logout {
-    NSMutableURLRequest *request = [self requestWithMethod:@"POST"                                                     path:@"/auth/logout"
+    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
+                                                     path:@"/auth/logout"
                                                   baseURL:kAuthBaseURL
                                                      body:@{}
                                                   timeout:15.0];
     [self performRequest:request completion:^(id result, NSError *error) {
         NSLog(@"[Lumi] logout: %@", error ?: @"ok");
     }];
-    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    for (NSHTTPCookie *cookie in [storage cookies]) {
-        if ([cookie.domain containsString:@"lumi.site"]) {
-            [storage deleteCookie:cookie];
-        }
-    }
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kUserCacheKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    [LumiSecureStore clearSession];
     self.currentUser = nil;
+    self.accessToken = nil;
+    self.refreshToken = nil;
 }
 
 #pragma mark - Catalog
 
 - (void)fetchCharacterIDsWithCompletion:(LumiAPICompletion)completion {
+    [self fetchIDListWithPublicPath:@"/public/characters?limit=1000"
+                    authenticatedPath:@"/characters?limit=1000"
+                         completion:completion];
+}
+
+- (void)fetchStoryIDsWithCompletion:(LumiAPICompletion)completion {
+    [self fetchIDListWithPublicPath:@"/public/stories?limit=1000"
+                    authenticatedPath:@"/stories?limit=1000"
+                         completion:completion];
+}
+
+- (void)fetchIDListWithPublicPath:(NSString *)publicPath
+                authenticatedPath:(NSString *)authenticatedPath
+                       completion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:@"/public/characters?limit=1000"
+                                                     path:publicPath
                                                   baseURL:kAPIBaseURL
                                                      body:nil
                                                   timeout:40.0];
     [self performRequest:request completion:^(id result, NSError *error) {
-        NSArray *items = [result isKindOfClass:[NSDictionary class]] ? result[@"items"] : nil;
-        if (![items isKindOfClass:[NSArray class]]) {
+        id items = [result isKindOfClass:[NSDictionary class]] ? result[@"items"] : nil;
+        if ([items isKindOfClass:[NSArray class]]) {
+            completion(items, nil);
+            return;
+        }
+        BOOL shouldRetryAuthenticated = (error.code == 401 || error.code == 403) && [self isAuthenticated];
+        if (!shouldRetryAuthenticated) {
             completion(nil, error ?: LumiError(500, @"Не удалось загрузить каталог"));
             return;
         }
-        completion(items, nil);
+        NSMutableURLRequest *retry = [self requestWithMethod:@"GET"
+                                                       path:authenticatedPath
+                                                    baseURL:kAPIBaseURL
+                                                       body:nil
+                                                    timeout:40.0];
+        [self performRequest:retry completion:^(id retryResult, NSError *retryError) {
+            id retryItems = [retryResult isKindOfClass:[NSDictionary class]] ? retryResult[@"items"] : nil;
+            if ([retryItems isKindOfClass:[NSArray class]]) {
+                completion(retryItems, nil);
+                return;
+            }
+            completion(nil, retryError ?: LumiError(500, @"Не удалось загрузить каталог"));
+        }];
     }];
 }
 
 - (void)fetchCharacterWithID:(NSString *)characterID completion:(LumiAPICompletion)completion {
-    [self fetchPublicDetailAtPath:[NSString stringWithFormat:@"/public/characters/%@", characterID]
-                          retries:1
-                       completion:completion];
-}
-
-- (void)fetchStoryIDsWithCompletion:(LumiAPICompletion)completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:@"/public/stories?limit=1000"
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:40.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        NSArray *items = [result isKindOfClass:[NSDictionary class]] ? result[@"items"] : nil;
-        if (![items isKindOfClass:[NSArray class]]) {
-            completion(nil, error ?: LumiError(500, @"Не удалось загрузить истории"));
-            return;
-        }
-        completion(items, nil);
-    }];
+    [self fetchDetailWithPublicPath:[NSString stringWithFormat:@"/public/characters/%@", characterID]
+                  authenticatedPath:[NSString stringWithFormat:@"/characters/%@", characterID]
+                         completion:completion];
 }
 
 - (void)fetchStoryWithID:(NSString *)storyID completion:(LumiAPICompletion)completion {
-    [self fetchPublicDetailAtPath:[NSString stringWithFormat:@"/public/stories/%@", storyID]
-                          retries:1
-                       completion:completion];
+    [self fetchDetailWithPublicPath:[NSString stringWithFormat:@"/public/stories/%@", storyID]
+                  authenticatedPath:[NSString stringWithFormat:@"/stories/%@", storyID]
+                         completion:completion];
 }
 
-- (void)fetchPublicDetailAtPath:(NSString *)path
-                        retries:(NSUInteger)retries
-                     completion:(LumiAPICompletion)completion {
+- (void)fetchDetailWithPublicPath:(NSString *)publicPath
+                authenticatedPath:(NSString *)authenticatedPath
+                       completion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:path
+                                                     path:publicPath
                                                   baseURL:kAPIBaseURL
                                                      body:nil
                                                   timeout:25.0];
     [self performRequest:request completion:^(id result, NSError *error) {
-        if (error.code == 429 && retries > 0) {
+        if (!error && [result isKindOfClass:[NSDictionary class]]) {
+            completion(result, nil);
+            return;
+        }
+        if (error.code == 429) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                [self fetchPublicDetailAtPath:path retries:retries - 1 completion:completion];
+                [self fetchDetailWithPublicPath:publicPath
+                              authenticatedPath:authenticatedPath
+                                     completion:completion];
             });
+            return;
+        }
+        if ((error.code == 401 || error.code == 403) && [self isAuthenticated]) {
+            NSMutableURLRequest *retry = [self requestWithMethod:@"GET"
+                                                           path:authenticatedPath
+                                                        baseURL:kAPIBaseURL
+                                                           body:nil
+                                                        timeout:25.0];
+            [self performRequest:retry completion:completion];
             return;
         }
         completion(result, error);
@@ -411,6 +564,9 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
             return;
         }
         NSArray *items = [result isKindOfClass:[NSDictionary class]] ? result[@"items"] : nil;
+        if (![items isKindOfClass:[NSArray class]] && [result isKindOfClass:[NSArray class]]) {
+            items = result;
+        }
         completion([items isKindOfClass:[NSArray class]] ? items : @[], nil);
     }];
 }
@@ -442,13 +598,11 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
     [bodies addObject:@{@"target_kind": kind, @"target_id": target}];
     [bodies addObject:@{@"kind": kind, @"target_id": target}];
     [bodies addObject:@{@"target_type": kind, @"target_id": target}];
-
-    [self attemptOpenChatWithBodies:bodies index:0 target:target completion:completion];
+    [self attemptOpenChatWithBodies:bodies index:0 completion:completion];
 }
 
 - (void)attemptOpenChatWithBodies:(NSArray<NSDictionary *> *)bodies
                             index:(NSUInteger)index
-                           target:(NSString *)target
                        completion:(LumiAPICompletion)completion {
     if (index >= bodies.count) {
         completion(nil, LumiError(400, @"Не удалось открыть чат"));
@@ -475,7 +629,7 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
             completion(result, error);
             return;
         }
-        [self attemptOpenChatWithBodies:bodies index:index + 1 target:target completion:completion];
+        [self attemptOpenChatWithBodies:bodies index:index + 1 completion:completion];
     }];
 }
 
@@ -587,16 +741,20 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
     configuration.HTTPShouldSetCookies = YES;
     self.session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
 
-    NSString *urlString = [NSString stringWithFormat:@"https://api.lumi.site/chats/%@/messages", self.chatID];
+    NSString *urlString = [NSString stringWithFormat:@"%@/chats/%@/messages", kAPIBaseURL, self.chatID];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
     request.HTTPMethod = @"POST";
     request.timeoutInterval = 180.0;
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [request setValue:@"text/event-stream" forHTTPHeaderField:@"Accept"];
     [request setValue:@"ru" forHTTPHeaderField:@"X-Lang"];
-    [request setValue:@"https://lumi.site" forHTTPHeaderField:@"Origin"];
-    [request setValue:@"https://lumi.site/" forHTTPHeaderField:@"Referer"];
+    [request setValue:kWebOrigin forHTTPHeaderField:@"Origin"];
+    [request setValue:[kWebOrigin stringByAppendingString:@"/"] forHTTPHeaderField:@"Referer"];
     [request setValue:@"ios-app" forHTTPHeaderField:@"X-Lumi-Client"];
+    NSString *token = [LumiAPI sharedClient].accessToken;
+    if (token.length) {
+        [request setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
+    }
     request.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"content": self.content ?: @""}
                                                       options:0 error:NULL];
     self.task = [self.session dataTaskWithRequest:request];
@@ -607,7 +765,7 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
     [self finishWithError:nil];
 }
 
-- (void)finishWithError:(nullable NSError *)error {
+- (void)finishWithError:(NSError *)error {
     if (self.finished) {
         return;
     }
