@@ -8,6 +8,15 @@ extern NSString *const LumiAPIErrorDomain;
 extern NSString *const LumiAPIDidUnauthorizedNotification;
 extern NSString *const LumiAuthDidChangeNotification;
 
+/// NSUserDefaults-backed session marker (works for rootful jailbreak apps).
+@interface LumiSecureStore : NSObject
++ (void)setObject:(nullable id)object forKey:(NSString *)key;
++ (nullable id)objectForKey:(NSString *)key;
++ (BOOL)hasSessionMaterial;
++ (void)markSessionActive:(BOOL)active;
++ (void)clearSession;
+@end
+
 @interface LumiSessionUser : NSObject
 @property (nonatomic, copy) NSString *userID;
 @property (nonatomic, copy, nullable) NSString *email;

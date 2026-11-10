@@ -553,6 +553,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     __block NSUInteger completed = 0;
     __block NSUInteger failed = 0;
     __block NSUInteger inFlight = 0;
+    __block __weak void (^weakPump)(void);
     __block void (^pump)(void);
     __weak typeof(self) weakSelf = self;
     NSString *phase = kind == LumiCatalogSyncKindCharacter ? @"Персонажи" : @"Истории";
@@ -609,7 +610,10 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                         });
                         return;
                     }
-                    pump();
+                    void (^nextPump)(void) = weakPump;
+                    if (nextPump) {
+                        nextPump();
+                    }
                 });
             };
             if (kind == LumiCatalogSyncKindCharacter) {
@@ -619,6 +623,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
         }
     };
+    weakPump = pump;
     dispatch_async(scheduler, pump);
 }
 
