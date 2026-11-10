@@ -165,14 +165,6 @@ static NSString *LumiEncodePath(NSString *path) {
                     completion:(void (^)(NSError *))completion;
 @end
 
-/// Bulk catalog loading entry point (declared before LumiAPI so callers see it).
-@interface LumiAPI (LumiCatalogDetail)
-- (void)fetchCatalogDetailWithKind:(NSString *)kind
-                        identifier:(NSString *)identifier
-             includeFailureStatus:(BOOL)includeFailureStatus
-                        completion:(LumiAPICompletion)completion;
-@end
-
 @interface LumiAPI ()
 @property (nonatomic, strong, readwrite, nullable) LumiSessionUser *currentUser;
 @property (nonatomic, strong, readwrite, nullable) NSString *accessToken;
