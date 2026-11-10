@@ -1,14 +1,19 @@
 #import "LumiProfileViewController.h"
-#import "LumiAPIClient.h"
-#import "LumiAuthViewController.h"
+#import "LumiAPI.h"
+#import "LumiCatalogStore.h"
+#import "LumiImageLoader.h"
+#import "LumiLoginViewController.h"
 #import "LumiTheme.h"
+#import "LumiWebAuthViewController.h"
 
 @interface LumiProfileViewController ()
-@property (nonatomic, strong) UIView *card;
+@property (nonatomic, strong) UIImageView *avatarView;
 @property (nonatomic, strong) UILabel *emailLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIButton *loginButton;
 @property (nonatomic, strong) UIButton *logoutButton;
+@property (nonatomic, strong) UILabel *catalogLabel;
+@property (nonatomic, strong) UIActivityIndicatorView *syncSpinner;
 @end
 
 @implementation LumiProfileViewController
@@ -16,17 +21,23 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = LumiBackgroundColor();
+    self.title = @"Профиль";
 
-    UIImageView *logo = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"LaunchLogo"]];
-    logo.translatesAutoresizingMaskIntoConstraints = NO;
-    logo.contentMode = UIViewContentModeScaleAspectFit;
-    [self.view addSubview:logo];
+    self.avatarView = [[UIImageView alloc] init];
+    self.avatarView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.avatarView.contentMode = UIViewContentModeScaleAspectFill;
+    self.avatarView.clipsToBounds = YES;
+    self.avatarView.layer.cornerRadius = 44.0;
+    self.avatarView.backgroundColor = LumiSurfaceColor();
+    self.avatarView.image = [UIImage imageNamed:@"LaunchLogo"];
+    [self.view addSubview:self.avatarView];
 
     self.emailLabel = [[UILabel alloc] init];
     self.emailLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.emailLabel.textColor = LumiTextColor();
     self.emailLabel.font = LumiFont(18.0, UIFontWeightSemibold);
     self.emailLabel.textAlignment = NSTextAlignmentCenter;
+    self.emailLabel.numberOfLines = 0;
     [self.view addSubview:self.emailLabel];
 
     self.statusLabel = [[UILabel alloc] init];
@@ -45,13 +56,31 @@
     [self.logoutButton addTarget:self action:@selector(logoutTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.logoutButton];
 
+    UIButton *refreshButton = [self buttonWithTitle:@"Обновить каталог" filled:NO];
+    [refreshButton addTarget:self action:@selector(refreshCatalogTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:refreshButton];
+
+    self.syncSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
+    self.syncSpinner.translatesAutoresizingMaskIntoConstraints = NO;
+    self.syncSpinner.color = LumiAccentColor();
+    self.syncSpinner.hidesWhenStopped = YES;
+    [self.view addSubview:self.syncSpinner];
+
+    self.catalogLabel = [[UILabel alloc] init];
+    self.catalogLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.catalogLabel.textColor = LumiMutedColor();
+    self.catalogLabel.font = LumiFont(12.0, UIFontWeightRegular);
+    self.catalogLabel.textAlignment = NSTextAlignmentCenter;
+    self.catalogLabel.numberOfLines = 0;
+    [self.view addSubview:self.catalogLabel];
+
     UIButton *aboutButton = [self buttonWithTitle:@"О приложении" filled:NO];
     [aboutButton addTarget:self action:@selector(aboutTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:aboutButton];
 
     UILabel *version = [[UILabel alloc] init];
     version.translatesAutoresizingMaskIntoConstraints = NO;
-    version.text = @"Lumi 1.2.0 · нативный клиент";
+    version.text = @"Lumi 1.3.0 · нативный клиент";
     version.textColor = LumiMutedColor();
     version.font = LumiFont(12.0, UIFontWeightRegular);
     version.textAlignment = NSTextAlignmentCenter;
@@ -59,12 +88,12 @@
 
     UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [logo.topAnchor constraintEqualToAnchor:guide.topAnchor constant:36.0],
-        [logo.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [logo.widthAnchor constraintEqualToConstant:88.0],
-        [logo.heightAnchor constraintEqualToConstant:88.0],
+        [self.avatarView.topAnchor constraintEqualToAnchor:guide.topAnchor constant:28.0],
+        [self.avatarView.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.avatarView.widthAnchor constraintEqualToConstant:88.0],
+        [self.avatarView.heightAnchor constraintEqualToConstant:88.0],
 
-        [self.emailLabel.topAnchor constraintEqualToAnchor:logo.bottomAnchor constant:14.0],
+        [self.emailLabel.topAnchor constraintEqualToAnchor:self.avatarView.bottomAnchor constant:14.0],
         [self.emailLabel.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:24.0],
         [self.emailLabel.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-24.0],
 
@@ -74,17 +103,29 @@
 
         [self.loginButton.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:24.0],
         [self.loginButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [self.loginButton.widthAnchor constraintEqualToConstant:220.0],
+        [self.loginButton.widthAnchor constraintEqualToConstant:240.0],
         [self.loginButton.heightAnchor constraintEqualToConstant:46.0],
 
         [self.logoutButton.topAnchor constraintEqualToAnchor:self.loginButton.bottomAnchor constant:10.0],
         [self.logoutButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [self.logoutButton.widthAnchor constraintEqualToConstant:220.0],
+        [self.logoutButton.widthAnchor constraintEqualToConstant:240.0],
         [self.logoutButton.heightAnchor constraintEqualToConstant:46.0],
 
-        [aboutButton.topAnchor constraintEqualToAnchor:self.logoutButton.bottomAnchor constant:10.0],
+        [refreshButton.topAnchor constraintEqualToAnchor:self.logoutButton.bottomAnchor constant:10.0],
+        [refreshButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [refreshButton.widthAnchor constraintEqualToConstant:240.0],
+        [refreshButton.heightAnchor constraintEqualToConstant:46.0],
+
+        [self.syncSpinner.centerYAnchor constraintEqualToAnchor:self.catalogLabel.centerYAnchor],
+        [self.syncSpinner.trailingAnchor constraintEqualToAnchor:self.catalogLabel.leadingAnchor constant:-8.0],
+
+        [self.catalogLabel.topAnchor constraintEqualToAnchor:refreshButton.bottomAnchor constant:14.0],
+        [self.catalogLabel.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:24.0],
+        [self.catalogLabel.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-24.0],
+
+        [aboutButton.topAnchor constraintEqualToAnchor:self.catalogLabel.bottomAnchor constant:10.0],
         [aboutButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [aboutButton.widthAnchor constraintEqualToConstant:220.0],
+        [aboutButton.widthAnchor constraintEqualToConstant:240.0],
         [aboutButton.heightAnchor constraintEqualToConstant:46.0],
 
         [version.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor constant:-16.0],
@@ -92,12 +133,40 @@
         [version.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-24.0],
     ]];
 
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(authChanged)
+                                                 name:LumiAuthDidChangeNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(catalogUpdated)
+                                                 name:LumiCatalogDidUpdateNotification
+                                               object:nil];
+
     [self refresh];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refresh];
+    [[LumiAPI sharedClient] refreshSessionWithCompletion:^(BOOL ok) {
+        [self refresh];
+    }];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)authChanged {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self refresh];
+    });
+}
+
+- (void)catalogUpdated {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self refreshCatalogLabel];
+    });
 }
 
 - (UIButton *)buttonWithTitle:(NSString *)title filled:(BOOL)filled {
@@ -116,51 +185,76 @@
 }
 
 - (void)refresh {
-    LumiAPIClient *client = [LumiAPIClient sharedClient];
+    LumiAPI *client = [LumiAPI sharedClient];
     if ([client isAuthenticated]) {
-        self.emailLabel.text = client.userEmail ?: @"Аккаунт Lumi";
-        self.statusLabel.text = @"Вы вошли в аккаунт";
+        LumiSessionUser *user = client.currentUser;
+        self.emailLabel.text = [user displayName] ?: @"Аккаунт Lumi";
+        self.statusLabel.text = @"Сессия Lumi активна — чаты синхронизируются с аккаунтом.";
+        [[LumiImageLoader sharedLoader] loadURLString:user.avatarURL intoImageView:self.avatarView];
         self.loginButton.hidden = YES;
         self.logoutButton.hidden = NO;
     } else {
         self.emailLabel.text = @"Гость";
-        self.statusLabel.text = @"Войдите, чтобы открыть чаты и историю";
+        self.statusLabel.text = @"Войдите, чтобы открыть чаты и продолжить переписки с аккаунта.";
+        self.avatarView.image = [UIImage imageNamed:@"LaunchLogo"];
         self.loginButton.hidden = NO;
         self.logoutButton.hidden = YES;
     }
+    [self refreshCatalogLabel];
+}
+
+- (void)refreshCatalogLabel {
+    LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    if (store.isSyncing) {
+        [self.syncSpinner startAnimating];
+        self.catalogLabel.text = store.syncStatus ?: @"Загрузка каталога…";
+        return;
+    }
+    [self.syncSpinner stopAnimating];
+    if (!store.characters.count) {
+        self.catalogLabel.text = @"Каталог ещё не загружен.";
+        return;
+    }
+    self.catalogLabel.text = [NSString stringWithFormat:@"Каталог: %lu персонажей, %lu историй",
+                              (unsigned long)store.characters.count, (unsigned long)store.stories.count];
 }
 
 - (void)loginTapped {
-    LumiAuthViewController *auth = [[LumiAuthViewController alloc] init];
-    auth.onSuccess = ^{
+    LumiLoginViewController *login = [[LumiLoginViewController alloc] init];
+    login.completion = ^{
         [self refresh];
     };
-    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:auth];
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:login];
     navigation.navigationBar.barStyle = UIBarStyleBlack;
     navigation.navigationBar.barTintColor = LumiBackgroundColor();
     navigation.navigationBar.tintColor = LumiAccentColor();
-    auth.title = @"Вход";
+    navigation.navigationBar.titleTextAttributes = @{NSForegroundColorAttributeName: LumiTextColor()};
     [self presentViewController:navigation animated:YES completion:nil];
 }
 
 - (void)logoutTapped {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Выйти из аккаунта?"
-                                                                   message:@"Токены будут удалены с этого устройства."
+                                                                   message:@"Сессия будет удалена с этого устройства."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Выйти"
                                               style:UIAlertActionStyleDestructive
                                             handler:^(UIAlertAction *action) {
-        [[LumiAPIClient sharedClient] logout];
+        [[LumiAPI sharedClient] logout];
+        [[NSNotificationCenter defaultCenter] postNotificationName:LumiAuthDidChangeNotification object:nil];
         [self refresh];
-        self.tabBarController.selectedIndex = 0;
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)refreshCatalogTapped {
+    [[LumiCatalogStore sharedStore] forceRefresh];
+    [self refreshCatalogLabel];
+}
+
 - (void)aboutTapped {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"О приложении"
-                                                                   message:@"Нативный клиент Lumi для iOS 12.\n\nДанные: lumi-api.nexoragroup.dev и api.lumi.site.\nПароль не сохраняется на устройстве, хранятся только токены.\n\nНеофициальный клиент, не связан с Lumi AI."
+                                                                   message:@"Нативный клиент Lumi для iOS 12.\n\nДанные: api.lumi.site и id.lumi.site.\nВход по email/паролю или через встроенный браузер (Google, Discord, Apple, капча).\nПароль не сохраняется на устройстве.\n\nНеофициальный клиент, не связан с Lumi AI."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];

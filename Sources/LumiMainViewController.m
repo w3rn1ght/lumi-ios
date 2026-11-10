@@ -1,4 +1,6 @@
 #import "LumiMainViewController.h"
+#import "LumiAPI.h"
+#import "LumiCatalogStore.h"
 #import "LumiCatalogViewController.h"
 #import "LumiChatsViewController.h"
 #import "LumiProfileViewController.h"
@@ -15,7 +17,7 @@
     LumiProfileViewController *profile = [[LumiProfileViewController alloc] init];
 
     self.viewControllers = @[
-        [self wrap:catalog title:@"Персонажи"],
+        [self wrap:catalog title:@"Каталог"],
         [self wrap:chats title:@"Чаты"],
         [self wrap:profile title:@"Профиль"],
     ];
@@ -23,8 +25,16 @@
     self.tabBar.translucent = NO;
     self.tabBar.barTintColor = LumiSurfaceColor();
     self.tabBar.tintColor = LumiAccentColor();
-    self.tabBar.unselectedItemTintColor = LumiMutedColor();
+    if (@available(iOS 10.0, *)) {
+        self.tabBar.unselectedItemTintColor = LumiMutedColor();
+    }
     self.selectedIndex = 0;
+
+    // Warm up the session and the catalog cache on launch.
+    [[LumiAPI sharedClient] refreshSessionWithCompletion:^(BOOL ok) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:LumiAuthDidChangeNotification object:nil];
+    }];
+    [[LumiCatalogStore sharedStore] startIfNeeded];
 }
 
 - (UINavigationController *)wrap:(UIViewController *)controller title:(NSString *)title {
