@@ -409,7 +409,7 @@
     if (![targetID isKindOfClass:[NSString class]]) {
         return nil;
     }
-    NSString *kind = chat[@"target_kind"] ?: chat[@"kind"] ?: chat[@"target"][@"kind"];
+    NSString *kind = chat[@"target_kind"] ?: chat[@"kind"] ?: chat[@"target_type"] ?: chat[@"target"][@"kind"];
     LumiCatalogStore *store = [LumiCatalogStore sharedStore];
     if ([kind isKindOfClass:[NSString class]] && [kind isEqualToString:@"story"]) {
         return [store storyWithID:targetID];
@@ -435,7 +435,7 @@
     NSDictionary *chat = self.chats[indexPath.row];
     NSDictionary *item = [self catalogItemForChat:chat] ?: @{};
     LumiDetailKind kind = LumiDetailKindCharacter;
-    id kindValue = chat[@"target_kind"] ?: chat[@"kind"] ?: chat[@"target"][@"kind"];
+    id kindValue = chat[@"target_kind"] ?: chat[@"kind"] ?: chat[@"target_type"] ?: chat[@"target"][@"kind"];
     if ([kindValue isKindOfClass:[NSString class]] && [kindValue isEqualToString:@"story"]) {
         kind = LumiDetailKindStory;
     }

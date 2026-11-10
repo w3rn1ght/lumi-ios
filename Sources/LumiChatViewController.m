@@ -319,7 +319,7 @@
         content = @"";
     }
     BOOL isUser = NO;
-    NSString *role = message[@"role"] ?: message[@"sender"] ?: message[@"author"];
+    NSString *role = message[@"role"] ?: message[@"sender"] ?: message[@"author"] ?: message[@"type"] ?: message[@"sender_type"];
     if ([role isKindOfClass:[NSString class]]) {
         isUser = [role isEqualToString:@"user"] || [role isEqualToString:@"human"];
     }
