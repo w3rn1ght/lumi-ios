@@ -11,7 +11,7 @@
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UILabel *dateLabel;
-- (void)configureWithChat:(NSDictionary *)chat item:(nullable NSDictionary *)item;
+- (void)configureWithChat:(NSDictionary *)chat item:(nullable NSDictionary *)item number:(NSUInteger)number;
 @end
 
 @implementation LumiSessionCell
@@ -74,12 +74,16 @@
     return self;
 }
 
-- (void)configureWithChat:(NSDictionary *)chat item:(NSDictionary *)item {
-    NSString *title = chat[@"title"];
-    if (![title isKindOfClass:[NSString class]] || !title.length) {
-        title = item[@"name"] ?: item[@"title"] ?: chat[@"target"][@"name"];
+- (void)configureWithChat:(NSDictionary *)chat item:(nullable NSDictionary *)item number:(NSUInteger)number {
+    NSString *name = item[@"name"] ?: item[@"title"];
+    if (![name isKindOfClass:[NSString class]] || !name.length) {
+        name = chat[@"target"][@"name"];
     }
-    self.titleLabel.text = title.length ? title : @"Чат";
+    if (![name isKindOfClass:[NSString class]] || !name.length) {
+        name = @"Персонаж";
+    }
+    NSString *nameAndNumber = [NSString stringWithFormat:@"%@  ·  чат №%lu", name, (unsigned long)number];
+    self.titleLabel.text = nameAndNumber;
 
     NSString *preview = [self previewFromChat:chat];
     self.subtitleLabel.text = preview.length ? preview : @"Нет сообщений";
@@ -427,7 +431,7 @@
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     LumiSessionCell *cell = [tableView dequeueReusableCellWithIdentifier:@"chat" forIndexPath:indexPath];
     NSDictionary *chat = self.chats[indexPath.row];
-    [cell configureWithChat:chat item:[self catalogItemForChat:chat]];
+    [cell configureWithChat:chat item:[self catalogItemForChat:chat] number:indexPath.row + 1];
     return cell;
 }
 

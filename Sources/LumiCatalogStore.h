@@ -29,6 +29,8 @@ extern NSString *const LumiCatalogDidUpdateNotification;
 @property (nonatomic, assign, readonly) NSUInteger phaseTotalCount;
 /// Details that failed to load in the current phase (shown in the status line).
 @property (nonatomic, assign, readonly) NSUInteger syncFailedCount;
+/// YES when the API answered with HTTP 429 for some details.
+@property (nonatomic, assign, readonly) BOOL syncRateLimited;
 /// Percent string for the whole sync, e.g. "37%".
 - (NSString *)syncPercentString;
 /// Percent string for the current phase, e.g. "12%".

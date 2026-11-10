@@ -147,9 +147,12 @@ static const NSUInteger kLumiImageDiskLimit = 700;
             image = LumiDecodeWebPData(data);
         }
         if (!image) {
+            image = [self imageFromAnimatedData:data];
+        }
+        if (!image) {
             image = [UIImage imageWithData:data];
         }
-        if (image && image.size.width > 700.0) {
+        if (image && image.size.width > 700.0 && image.images.count == 0) {
             image = [self downscaledImage:image maxDimension:700.0];
         }
         if (image) {
@@ -170,6 +173,72 @@ static const NSUInteger kLumiImageDiskLimit = 700;
     UIImage *scaled = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     return scaled ?: image;
+}
+
+
+#pragma mark - Animated images
+
+- (UIImage *)imageFromAnimatedData:(NSData *)data {
+    if (data.length < 10) {
+        return nil;
+    }
+    CGImageSourceRef source = CGImageSourceCreateWithData((CFDataRef)data, NULL);
+    if (!source) {
+        return nil;
+    }
+    size_t count = CGImageSourceGetCount(source);
+    UIImage *result = nil;
+    if (count > 1) {
+        NSMutableArray *frames = [NSMutableArray arrayWithCapacity:count];
+        double totalDuration = 0.0;
+        for (size_t index = 0; index < count; index++) {
+            CGImageRef frameRef = CGImageSourceCreateImageAtIndex(source, index, NULL);
+            if (!frameRef) {
+                continue;
+            }
+            [frames addObject:(__bridge id)frameRef];
+            CGImageRelease(frameRef);
+            totalDuration += [self frameDurationAtIndex:(NSUInteger)index source:source];
+        }
+        if (frames.count > 1) {
+            if (totalDuration <= 0.0) {
+                totalDuration = 0.1 * frames.count;
+            }
+            result = [UIImage animatedImageWithImages:frames duration:totalDuration];
+        }
+    }
+    if (!result) {
+        CGImageRef imageRef = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        if (imageRef) {
+            result = [UIImage imageWithCGImage:imageRef];
+            CGImageRelease(imageRef);
+        }
+    }
+    CFRelease(source);
+    return result;
+}
+
+- (double)frameDurationAtIndex:(NSUInteger)index source:(CGImageSourceRef)source {
+    double duration = 0.1;
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, index, NULL);
+    if (!properties) {
+        return duration;
+    }
+    CFDictionaryRef gif = CFDictionaryGetValue(properties, kCGImagePropertyGIFDictionary);
+    if (gif) {
+        CFNumberRef number = CFDictionaryGetValue(gif, kCGImagePropertyGIFUnclampedDelayTime);
+        if (!number) {
+            number = CFDictionaryGetValue(gif, kCGImagePropertyGIFDelayTime);
+        }
+        if (number) {
+            CFNumberGetValue(number, kCFNumberDoubleType, &duration);
+        }
+    }
+    CFRelease(properties);
+    if (duration < 0.011) {
+        duration = 0.1;
+    }
+    return duration;
 }
 
 #pragma mark - Disk cache

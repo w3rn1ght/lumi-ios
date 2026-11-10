@@ -5,7 +5,10 @@ NSString *const LumiCatalogDidUpdateNotification = @"LumiCatalogDidUpdateNotific
 
 static NSString *const kCatalogFileName = @"catalog-v2.json";
 static const NSTimeInterval kCatalogMaxAge = 12 * 60 * 60;
-static const NSUInteger kDetailConcurrency = 12;
+static const NSUInteger kDetailConcurrency = 14;
+static const NSUInteger kDetailMinimumWorkers = 3;
+static const NSUInteger kDetailInitialWorkers = 10;
+static const NSUInteger kDetailMinimumWorkers = 3;
 
 typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     LumiCatalogSyncKindCharacter = 0,
@@ -28,11 +31,13 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 @property (nonatomic, assign, readwrite) NSUInteger phaseCompletedCount;
 @property (nonatomic, assign, readwrite) NSUInteger phaseTotalCount;
 @property (nonatomic, assign, readwrite) NSUInteger syncFailedCount;
+@property (nonatomic, assign, readwrite) BOOL syncRateLimited;
 @property (nonatomic, assign) NSUInteger totalStoryCount;
 @property (nonatomic, assign) NSUInteger syncedStoryCount;
 @property (nonatomic, strong) LumiAPI *api;
 @property (nonatomic, strong, nullable) NSDate *savedAt;
 @property (nonatomic, assign) BOOL started;
+@property (nonatomic, strong) dispatch_queue_t stateQueue;
 @end
 
 @implementation LumiCatalogStore
@@ -109,7 +114,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSString *base = [NSString stringWithFormat:@"%@ · %@ · %lu / %lu",
                       phase, [self phasePercentString],
                       (unsigned long)self.phaseCompletedCount, (unsigned long)self.phaseTotalCount];
-    if (self.syncFailedCount > 0) {
+    if (self.syncRateLimited) {
+        base = [base stringByAppendingString:@"  ·  сервер ограничивает запросы, ждём…"];
+    } else if (self.syncFailedCount > 0) {
         base = [base stringByAppendingFormat:@"  ·  ошибок: %lu", (unsigned long)self.syncFailedCount];
     }
     return base;
@@ -165,7 +172,22 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
              @"Постапокалипсис", @"Экшен", @"Юмор"];
 }
 
+#pragma mark - State serialization
+
+/// Mutations run on a private serial queue; UI components read `characters` /
+/// `stories` from the main thread (assigning an immutable array is safe).
+- (void)performState:(dispatch_block_t)block {
+    if (!self.stateQueue) {
+        self.stateQueue = dispatch_queue_create("com.w3rn1ght.lumi.catalog.state", DISPATCH_QUEUE_SERIAL);
+    }
+    dispatch_async(self.stateQueue, block);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self notifyUpdate];
+    });
+}
+
 #pragma mark - Cache
+
 
 - (NSString *)cachePath {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
@@ -319,6 +341,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.syncPhase = phase;
     self.syncStatus = nil;
     self.syncFailedCount = 0;
+    self.syncRateLimited = NO;
     self.syncCompletedCount = 0;
     self.syncTotalCount = 0;
     self.phaseCompletedCount = 0;
@@ -548,25 +571,38 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         completion(0);
         return;
     }
+    LumiAPI *api = self.api;
     dispatch_queue_t scheduler = dispatch_queue_create("com.w3rn1ght.lumi.catalog.workers", DISPATCH_QUEUE_SERIAL);
     __block NSUInteger nextIndex = 0;
     __block NSUInteger completed = 0;
     __block NSUInteger failed = 0;
     __block NSUInteger inFlight = 0;
+    __block NSUInteger rateLimited = 0;
+    __block NSUInteger workers = kDetailInitialWorkers;
+    __block BOOL finished = NO;
+    NSUInteger maxWorkers = kDetailConcurrency;
     __block __weak void (^weakPump)(void);
     __block void (^pump)(void);
     __weak typeof(self) weakSelf = self;
     NSString *phase = kind == LumiCatalogSyncKindCharacter ? @"Персонажи" : @"Истории";
+    NSString *kindSlug = kind == LumiCatalogSyncKindCharacter ? @"characters" : @"stories";
     NSUInteger reportEvery = kind == LumiCatalogSyncKindCharacter ? 5 : 4;
     NSUInteger saveEvery = kind == LumiCatalogSyncKindCharacter ? 150 : 100;
-    self.syncFailedCount = 0;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        weakSelf.syncFailedCount = 0;
+        weakSelf.syncRateLimited = NO;
+    });
 
     pump = ^{
+        if (finished) {
+            return;
+        }
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
             return;
         }
-        while (inFlight < kDetailConcurrency && nextIndex < total) {
+        while (inFlight < workers && nextIndex < total) {
             NSString *identifier = ids[nextIndex];
             nextIndex += 1;
             inFlight += 1;
@@ -583,18 +619,45 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                     completed += 1;
                     if (!ok) {
                         failed += 1;
+                        BOOL limited = (error.code == 429);
+                        if (limited) {
+                            rateLimited += 1;
+                        }
+                        if (!limited && error.code == 0) {
+                            // Transport errors: keep going, they are usually transient.
+                        }
                     }
                     inFlight -= 1;
+
+                    // Adaptive back-off: if the server throttles, lower concurrency
+                    // (min 3). Recover slowly when everything succeeds again.
+                    if (rateLimited > 0 && completed % 12 == 0) {
+                        workers = workers > kDetailMinimumWorkers ? workers - 4 : kDetailMinimumWorkers;
+                        if (workers < kDetailMinimumWorkers) {
+                            workers = kDetailMinimumWorkers;
+                        }
+                    } else if (rateLimited == 0 && workers < maxWorkers && completed % 40 == 0) {
+                        workers += 2;
+                        if (workers > maxWorkers) {
+                            workers = maxWorkers;
+                        }
+                    }
+
                     NSUInteger done = alreadyDone + completed;
                     if (completed % reportEvery == 0 || completed == total) {
+                        NSUInteger failedSnapshot = failed;
+                        NSUInteger doneSnapshot = done;
+                        NSUInteger totalSnapshot = total;
+                        BOOL limitedSnapshot = rateLimited > 0;
                         dispatch_async(dispatch_get_main_queue(), ^{
                             if (kind == LumiCatalogSyncKindCharacter) {
-                                strongSelf.syncedCharacterCount = done;
+                                strongSelf.syncedCharacterCount = doneSnapshot;
                             } else {
-                                strongSelf.syncedStoryCount = done;
+                                strongSelf.syncedStoryCount = doneSnapshot;
                             }
-                            strongSelf.syncFailedCount = failed;
-                            [strongSelf updateProgressWithPhase:phase phaseDone:done phaseTotal:overallTotal];
+                            strongSelf.syncFailedCount = failedSnapshot;
+                            strongSelf.syncRateLimited = limitedSnapshot;
+                            [strongSelf updateProgressWithPhase:phase phaseDone:doneSnapshot phaseTotal:overallTotal];
                             [strongSelf recalculateProgress];
                             [strongSelf notifyUpdate];
                         });
@@ -605,8 +668,13 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                         }
                     }
                     if (completed == total) {
+                        if (finished) {
+                            return;
+                        }
+                        finished = true;
+                        NSUInteger failedFinal = failed;
                         dispatch_async(dispatch_get_main_queue(), ^{
-                            completion(failed);
+                            completion(failedFinal);
                         });
                         return;
                     }
@@ -616,15 +684,15 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                     }
                 });
             };
-            if (kind == LumiCatalogSyncKindCharacter) {
-                [strongSelf.api fetchCharacterWithID:identifier completion:handler];
-            } else {
-                [strongSelf.api fetchStoryWithID:identifier completion:handler];
-            }
+            [api fetchCatalogDetailWithKind:kindSlug
+                                 identifier:identifier
+                      includeFailureStatus:YES
+                                 completion:handler];
         }
     };
     weakPump = pump;
     dispatch_async(scheduler, pump);
+    (void)total;
 }
 
 #pragma mark - Detail handling
@@ -652,20 +720,22 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     if (detail[@"owner"][@"username"]) {
         entry[@"owner"] = @{@"username": detail[@"owner"][@"username"]};
     }
-    NSMutableArray *characters = [self.characters mutableCopy] ?: [NSMutableArray array];
-    NSUInteger existingIndex = NSNotFound;
-    for (NSUInteger index = 0; index < characters.count; index++) {
-        if ([characters[index][@"id"] isEqual:identifier]) {
-            existingIndex = index;
-            break;
+    [self performState:^{
+        NSMutableArray *characters = [self.characters mutableCopy] ?: [NSMutableArray array];
+        NSUInteger existingIndex = NSNotFound;
+        for (NSUInteger index = 0; index < characters.count; index++) {
+            if ([characters[index][@"id"] isEqual:identifier]) {
+                existingIndex = index;
+                break;
+            }
         }
-    }
-    if (existingIndex != NSNotFound) {
-        [characters replaceObjectAtIndex:existingIndex withObject:entry];
-    } else {
-        [characters addObject:entry];
-    }
-    self.characters = characters;
+        if (existingIndex != NSNotFound) {
+            [characters replaceObjectAtIndex:existingIndex withObject:entry];
+        } else {
+            [characters addObject:entry];
+        }
+        self.characters = characters;
+    }];
 }
 
 - (void)addStoryDetail:(NSDictionary *)detail {
@@ -717,20 +787,22 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     if ([detail[@"owner"] isKindOfClass:[NSDictionary class]] && detail[@"owner"][@"username"]) {
         entry[@"owner"] = @{@"username": detail[@"owner"][@"username"]};
     }
-    NSMutableArray *stories = [self.stories mutableCopy] ?: [NSMutableArray array];
-    NSUInteger existingIndex = NSNotFound;
-    for (NSUInteger index = 0; index < stories.count; index++) {
-        if ([stories[index][@"id"] isEqual:identifier]) {
-            existingIndex = index;
-            break;
+    [self performState:^{
+        NSMutableArray *stories = [self.stories mutableCopy] ?: [NSMutableArray array];
+        NSUInteger existingIndex = NSNotFound;
+        for (NSUInteger index = 0; index < stories.count; index++) {
+            if ([stories[index][@"id"] isEqual:identifier]) {
+                existingIndex = index;
+                break;
+            }
         }
-    }
-    if (existingIndex != NSNotFound) {
-        [stories replaceObjectAtIndex:existingIndex withObject:entry];
-    } else {
-        [stories addObject:entry];
-    }
-    self.stories = stories;
+        if (existingIndex != NSNotFound) {
+            [stories replaceObjectAtIndex:existingIndex withObject:entry];
+        } else {
+            [stories addObject:entry];
+        }
+        self.stories = stories;
+    }];
 }
 
 - (NSArray *)sortedCharacters:(NSArray *)characters {
