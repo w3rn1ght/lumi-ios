@@ -498,39 +498,6 @@ static NSString *LumiEncodePath(NSString *path) {
     }];
 }
 
-/// Direct, single-shot detail request used by the catalog bulk loader.
-/// `includeFailureStatus` reports the HTTP status of the last attempt so the
-/// caller can adapt its concurrency (e.g. back off on 429).
-- (void)fetchCatalogDetailWithKind:(NSString *)kind
-                        identifier:(NSString *)identifier
-             includeFailureStatus:(BOOL)includeFailureStatus
-                        completion:(LumiAPICompletion)completion {
-    NSString *publicPath = [NSString stringWithFormat:@"/public/%@/%@", kind, identifier];
-    NSString *authedPath = [NSString stringWithFormat:@"/%@/%@", kind, identifier];
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:publicPath
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:20.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        if (!error && [result isKindOfClass:[NSDictionary class]]) {
-            completion(result, nil);
-            return;
-        }
-        BOOL shouldFallback = (error.code == 401 || error.code == 403) && [self isAuthenticated];
-        if (!shouldFallback) {
-            completion(nil, error);
-            return;
-        }
-        NSMutableURLRequest *retry = [self requestWithMethod:@"GET"
-                                                       path:authedPath
-                                                    baseURL:kAPIBaseURL
-                                                       body:nil
-                                                    timeout:20.0];
-        [self performRequest:retry completion:completion];
-    }];
-}
-
 - (void)fetchCharacterWithID:(NSString *)characterID completion:(LumiAPICompletion)completion {
     [self fetchDetailWithPublicPath:[NSString stringWithFormat:@"/public/characters/%@", characterID]
                   authenticatedPath:[NSString stringWithFormat:@"/characters/%@", characterID]
