@@ -1,11 +1,3 @@
-"""
-Проверка нативного API Lumi в GitHub Actions.
-Хост lumi-api.nexoragroup.dev недоступен с локальной машины,
-поэтому запросы выполняются на раннере.
-
-Внимание: успешный вход не проверяется, чтобы не использовать чужие аккаунты.
-"""
-
 import json
 import urllib.error
 import urllib.request

@@ -70,7 +70,7 @@
 
 @implementation LumiChatViewController
 
-- (instancetype)initWithSessionID:(NSString *)sessionID title:(NSString *)title {
+- (instancetype)initWithSessionID:(NSString *)sessionID title:(nullable NSString *)title {
     self = [super init];
     if (self) {
         _sessionID = [sessionID copy];

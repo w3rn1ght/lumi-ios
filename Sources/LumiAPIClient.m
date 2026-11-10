@@ -118,10 +118,6 @@ static NSString *const kUserEmailKey = @"lumi.user_email";
                 completion([json isKindOfClass:[NSDictionary class]] ? json : @{@"data": json}, nil);
                 return;
             }
-            if (http.statusCode == 204) {
-                completion(@{}, nil);
-                return;
-            }
             NSString *message = [self messageFromErrorJSON:json
                                                   fallback:[NSString stringWithFormat:@"HTTP %ld", (long)http.statusCode]];
             NSError *apiError = [self errorWithMessage:message code:http.statusCode];
