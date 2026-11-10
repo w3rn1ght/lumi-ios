@@ -4,7 +4,11 @@
 
 static NSString *const kCallbackScheme = @"ai.lumi.app";
 
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 130000
 @interface LumiOAuthController () <ASWebAuthenticationPresentationContextProviding>
+#else
+@interface LumiOAuthController ()
+#endif
 @property (nonatomic, strong, nullable) ASWebAuthenticationSession *session;
 @property (nonatomic, weak, nullable) UIViewController *presenter;
 @property (nonatomic, copy, nullable) void (^completion)(BOOL, NSError *);
@@ -65,7 +69,11 @@ static NSString *const kCallbackScheme = @"ai.lumi.app";
             [weakSelf handleCallbackURL:callbackURL error:error provider:provider];
         });
     }];
-    session.presentationContextProvider = self;
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 130000
+    if (@available(iOS 13.0, *)) {
+        session.presentationContextProvider = self;
+    }
+#endif
     self.session = session;
     if (![session start]) {
         [self finishWithSuccess:NO error:[self errorWithMessage:@"Не удалось открыть окно входа"]];
@@ -178,6 +186,7 @@ static NSString *const kCallbackScheme = @"ai.lumi.app";
 
 #pragma mark - ASWebAuthenticationPresentationContextProviding
 
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 130000
 - (ASPresentationAnchor)presentationAnchorForWebAuthenticationSession:(ASWebAuthenticationSession *)session {
     UIWindow *window = self.presenter.view.window;
     if (window) {
@@ -185,5 +194,6 @@ static NSString *const kCallbackScheme = @"ai.lumi.app";
     }
     return [UIApplication sharedApplication].keyWindow;
 }
+#endif
 
 @end
