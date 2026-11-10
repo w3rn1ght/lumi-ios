@@ -18,6 +18,22 @@ extern NSString *const LumiCatalogDidUpdateNotification;
 @property (nonatomic, assign, readonly) NSUInteger totalCharacterCount;
 @property (nonatomic, copy, readonly, nullable) NSString *syncStatus;
 
+/// Human readable phase, e.g. "Персонажи" / "Истории".
+@property (nonatomic, copy, readonly, nullable) NSString *syncPhase;
+/// 0.0–1.0 progress across the whole sync (characters + stories).
+@property (nonatomic, assign, readonly) double syncProgress;
+@property (nonatomic, assign, readonly) NSUInteger syncCompletedCount;
+@property (nonatomic, assign, readonly) NSUInteger syncTotalCount;
+/// Completed/total for the current phase only.
+@property (nonatomic, assign, readonly) NSUInteger phaseCompletedCount;
+@property (nonatomic, assign, readonly) NSUInteger phaseTotalCount;
+/// Percent string for the whole sync, e.g. "37%".
+- (NSString *)syncPercentString;
+/// Percent string for the current phase, e.g. "12%".
+- (NSString *)phasePercentString;
+/// "#1 · Персонажи · 37% · 512 / 1380"
+- (NSString *)syncDetailedDescription;
+
 /// Ordered genre chips (Все first, then popular genres).
 + (NSArray<NSString *> *)characterGenres;
 + (NSArray<NSString *> *)storyGenres;

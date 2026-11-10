@@ -16,6 +16,14 @@ static const NSUInteger kDetailConcurrency = 6;
 @property (nonatomic, assign, readwrite) NSUInteger syncedCharacterCount;
 @property (nonatomic, assign, readwrite) NSUInteger totalCharacterCount;
 @property (nonatomic, copy, readwrite, nullable) NSString *syncStatus;
+@property (nonatomic, copy, readwrite, nullable) NSString *syncPhase;
+@property (nonatomic, assign, readwrite) double syncProgress;
+@property (nonatomic, assign, readwrite) NSUInteger syncCompletedCount;
+@property (nonatomic, assign, readwrite) NSUInteger syncTotalCount;
+@property (nonatomic, assign, readwrite) NSUInteger phaseCompletedCount;
+@property (nonatomic, assign, readwrite) NSUInteger phaseTotalCount;
+@property (nonatomic, assign) NSUInteger totalStoryCount;
+@property (nonatomic, assign) NSUInteger syncedStoryCount;
 @property (nonatomic, strong) LumiAPI *api;
 @property (nonatomic, strong, nullable) NSDate *savedAt;
 @property (nonatomic, strong) dispatch_queue_t stateQueue;
@@ -44,8 +52,78 @@ static const NSUInteger kDetailConcurrency = 6;
         _storyTags = @[];
         _stateQueue = dispatch_queue_create("com.w3rn1ght.lumi.catalog", DISPATCH_QUEUE_SERIAL);
         _syncStatus = nil;
+        _syncPhase = nil;
+        _syncProgress = 0.0;
     }
     return self;
+}
+
+#pragma mark - Progress helpers
+
+- (NSString *)syncPercentString {
+    if (self.syncTotalCount == 0) {
+        return self.isSyncing ? @"0%" : @"100%";
+    }
+    double ratio = (double)self.syncCompletedCount / (double)self.syncTotalCount;
+    if (ratio > 1.0) {
+        ratio = 1.0;
+    }
+    if (ratio < 0.0) {
+        ratio = 0.0;
+    }
+    return [NSString stringWithFormat:@"%d%%", (int)floor(ratio * 100.0 + 0.5)];
+}
+
+- (NSString *)phasePercentString {
+    if (self.phaseTotalCount == 0) {
+        return self.isSyncing ? @"0%" : @"100%";
+    }
+    double ratio = (double)self.phaseCompletedCount / (double)self.phaseTotalCount;
+    if (ratio > 1.0) {
+        ratio = 1.0;
+    }
+    if (ratio < 0.0) {
+        ratio = 0.0;
+    }
+    return [NSString stringWithFormat:@"%d%%", (int)floor(ratio * 100.0 + 0.5)];
+}
+
+- (NSString *)syncDetailedDescription {
+    if (!self.isSyncing) {
+        return [NSString stringWithFormat:@"Каталог загружен · %lu персонажей · %lu историй",
+                (unsigned long)self.characters.count, (unsigned long)self.stories.count];
+    }
+    NSString *phase = self.syncPhase.length ? self.syncPhase : @"Подготовка";
+    if (self.syncTotalCount == 0) {
+        return [NSString stringWithFormat:@"%@ · получение списка…", phase];
+    }
+    return [NSString stringWithFormat:@"%@ · %@ · %lu / %lu",
+            phase, [self syncPercentString],
+            (unsigned long)self.syncCompletedCount, (unsigned long)self.syncTotalCount];
+}
+
+- (void)updateProgressWithPhase:(NSString *)phase
+                    phaseDone:(NSUInteger)phaseDone
+                   phaseTotal:(NSUInteger)phaseTotal {
+    self.syncPhase = phase;
+    self.phaseCompletedCount = phaseDone;
+    self.phaseTotalCount = phaseTotal;
+    self.syncStatus = [self syncDetailedDescription];
+}
+
+- (void)recalculateProgress {
+    NSUInteger charactersTotal = self.totalCharacterCount;
+    NSUInteger storiesTotal = MAX(self.totalStoryCount, self.stories.count);
+    if (storiesTotal == 0 && self.syncPhase && [self.syncPhase isEqualToString:@"Истории"]) {
+        storiesTotal = self.phaseTotalCount;
+    }
+    self.syncTotalCount = charactersTotal + storiesTotal;
+    self.syncCompletedCount = MIN(self.syncedCharacterCount, charactersTotal) +
+                              MIN(self.syncedStoryCount, storiesTotal);
+    self.syncProgress = self.syncTotalCount > 0
+        ? (double)self.syncCompletedCount / (double)self.syncTotalCount
+        : 0.0;
+    self.syncStatus = [self syncDetailedDescription];
 }
 
 + (NSArray<NSString *> *)characterGenres {
@@ -160,6 +238,14 @@ static const NSUInteger kDetailConcurrency = 6;
     self.syncStatus = @"Загрузка каталога…";
     self.syncedCharacterCount = 0;
     self.totalCharacterCount = 0;
+    self.syncedStoryCount = 0;
+    self.totalStoryCount = 0;
+    self.syncPhase = @"Подготовка";
+    self.syncCompletedCount = 0;
+    self.syncTotalCount = 0;
+    self.phaseCompletedCount = 0;
+    self.phaseTotalCount = 0;
+    self.syncProgress = 0.0;
     [self notifyUpdate];
     [self syncTags];
     [self syncCharacterIDs];
@@ -186,6 +272,7 @@ static const NSUInteger kDetailConcurrency = 6;
         if (![result isKindOfClass:[NSArray class]]) {
             self.isSyncing = NO;
             self.syncStatus = error.localizedDescription ?: @"Не удалось загрузить каталог";
+            self.syncPhase = nil;
             [self notifyUpdate];
             return;
         }
@@ -198,6 +285,7 @@ static const NSUInteger kDetailConcurrency = 6;
             }
         }
         self.totalCharacterCount = ids.count;
+        [self recalculateProgress];
         NSMutableDictionary *known = [NSMutableDictionary dictionary];
         for (NSDictionary *character in self.characters) {
             id identifier = character[@"id"];
@@ -222,6 +310,8 @@ static const NSUInteger kDetailConcurrency = 6;
         if (merged.count) {
             self.characters = [self sortedCharacters:merged];
         }
+        self.syncedCharacterCount = known.count;
+        [self updateProgressWithPhase:@"Персонажи" phaseDone:self.syncedCharacterCount phaseTotal:ids.count];
         [self notifyUpdate];
 
         if (!missing.count) {
@@ -230,6 +320,8 @@ static const NSUInteger kDetailConcurrency = 6;
         }
         __block NSUInteger completed = 0;
         NSUInteger total = missing.count;
+        NSUInteger alreadyLoaded = known.count;
+        NSUInteger overallTotal = ids.count;
         dispatch_group_t group = dispatch_group_create();
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(kDetailConcurrency);
         __weak typeof(self) weakSelf = self;
@@ -243,10 +335,12 @@ static const NSUInteger kDetailConcurrency = 6;
                     }
                     dispatch_semaphore_signal(semaphore);
                     completed++;
-                    if (completed % 25 == 0 || completed == total) {
-                        weakSelf.syncedCharacterCount = completed;
-                        weakSelf.syncStatus = [NSString stringWithFormat:@"Загрузка персонажей… %lu из %lu",
-                                               (unsigned long)completed, (unsigned long)total];
+                    if (completed % 5 == 0 || completed == total) {
+                        weakSelf.syncedCharacterCount = alreadyLoaded + completed;
+                        [weakSelf updateProgressWithPhase:@"Персонажи"
+                                               phaseDone:weakSelf.syncedCharacterCount
+                                              phaseTotal:overallTotal];
+                        [weakSelf recalculateProgress];
                         [weakSelf notifyUpdate];
                         if (completed % 150 == 0) {
                             [weakSelf saveCache];
@@ -257,7 +351,8 @@ static const NSUInteger kDetailConcurrency = 6;
             });
         }
         dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-            weakSelf.syncedCharacterCount = total;
+            weakSelf.syncedCharacterCount = overallTotal;
+            [weakSelf recalculateProgress];
             [weakSelf saveCache];
             [weakSelf syncStoryIDs];
         });
@@ -265,12 +360,14 @@ static const NSUInteger kDetailConcurrency = 6;
 }
 
 - (void)syncStoryIDs {
-    self.syncStatus = @"Загрузка историй…";
+    [self updateProgressWithPhase:@"Истории" phaseDone:0 phaseTotal:0];
+    [self recalculateProgress];
     [self notifyUpdate];
     [self.api fetchStoryIDsWithCompletion:^(id result, NSError *error) {
         if (![result isKindOfClass:[NSArray class]]) {
             self.isSyncing = NO;
             self.syncStatus = nil;
+            self.syncPhase = nil;
             [self saveCache];
             [self notifyUpdate];
             return;
@@ -300,11 +397,16 @@ static const NSUInteger kDetailConcurrency = 6;
             }
         }
         self.stories = [self sortedStories:merged];
+        self.totalStoryCount = ids.count;
+        self.syncedStoryCount = known.count;
+        [self updateProgressWithPhase:@"Истории" phaseDone:self.syncedStoryCount phaseTotal:ids.count];
+        [self recalculateProgress];
         [self notifyUpdate];
 
         if (!missing.count) {
             self.isSyncing = NO;
             self.syncStatus = nil;
+            self.syncPhase = nil;
             [self saveCache];
             [self notifyUpdate];
             return;
@@ -312,6 +414,8 @@ static const NSUInteger kDetailConcurrency = 6;
 
         __block NSUInteger completed = 0;
         NSUInteger total = missing.count;
+        NSUInteger alreadyLoaded = known.count;
+        NSUInteger overallTotal = ids.count;
         dispatch_group_t group = dispatch_group_create();
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(kDetailConcurrency);
         __weak typeof(self) weakSelf = self;
@@ -325,9 +429,12 @@ static const NSUInteger kDetailConcurrency = 6;
                     }
                     dispatch_semaphore_signal(semaphore);
                     completed++;
-                    if (completed % 20 == 0 || completed == total) {
-                        weakSelf.syncStatus = [NSString stringWithFormat:@"Загрузка историй… %lu из %lu",
-                                               (unsigned long)completed, (unsigned long)total];
+                    if (completed % 4 == 0 || completed == total) {
+                        weakSelf.syncedStoryCount = alreadyLoaded + completed;
+                        [weakSelf updateProgressWithPhase:@"Истории"
+                                               phaseDone:weakSelf.syncedStoryCount
+                                              phaseTotal:overallTotal];
+                        [weakSelf recalculateProgress];
                         [weakSelf notifyUpdate];
                         if (completed % 100 == 0) {
                             [weakSelf saveCache];
@@ -338,8 +445,11 @@ static const NSUInteger kDetailConcurrency = 6;
             });
         }
         dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+            weakSelf.syncedStoryCount = overallTotal;
+            [weakSelf recalculateProgress];
             weakSelf.isSyncing = NO;
             weakSelf.syncStatus = nil;
+            weakSelf.syncPhase = nil;
             [weakSelf saveCache];
             [weakSelf notifyUpdate];
             NSLog(@"[Lumi] catalog sync finished: %lu characters, %lu stories",

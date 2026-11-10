@@ -79,7 +79,7 @@
 
     UILabel *version = [[UILabel alloc] init];
     version.translatesAutoresizingMaskIntoConstraints = NO;
-    version.text = @"Lumi 1.3.1 · нативный клиент";
+    version.text = @"Lumi 1.3.2 · нативный клиент";
     version.textColor = LumiMutedColor();
     version.font = LumiFont(12.0, UIFontWeightRegular);
     version.textAlignment = NSTextAlignmentCenter;
@@ -206,7 +206,7 @@
     LumiCatalogStore *store = [LumiCatalogStore sharedStore];
     if (store.isSyncing) {
         [self.syncSpinner startAnimating];
-        self.catalogLabel.text = store.syncStatus ?: @"Загрузка каталога…";
+        self.catalogLabel.text = [store syncDetailedDescription];
         return;
     }
     [self.syncSpinner stopAnimating];

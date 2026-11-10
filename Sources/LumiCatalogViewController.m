@@ -154,6 +154,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
 @property (nonatomic, strong) UIStackView *chipsStack;
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, copy) NSString *selectedTag;
 @property (nonatomic, copy) NSArray<NSDictionary *> *items;
@@ -228,11 +229,18 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     self.spinner.color = LumiAccentColor();
     self.spinner.hidesWhenStopped = YES;
 
+    self.progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.progressView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.progressView.progressTintColor = LumiAccentColor();
+    self.progressView.trackTintColor = LumiElevatedColor();
+    self.progressView.hidden = YES;
+
     [self.view addSubview:self.segmentedControl];
     [self.view addSubview:self.searchBar];
     [self.view addSubview:self.chipsScrollView];
     [self.view addSubview:self.tableView];
     [self.view addSubview:self.statusLabel];
+    [self.view addSubview:self.progressView];
     [self.view addSubview:self.spinner];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
@@ -266,6 +274,11 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
         [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20.0],
         [self.statusLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20.0],
         [self.statusLabel.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-10.0],
+
+        [self.progressView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20.0],
+        [self.progressView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20.0],
+        [self.progressView.bottomAnchor constraintEqualToAnchor:self.statusLabel.topAnchor constant:-6.0],
+        [self.progressView.heightAnchor constraintEqualToConstant:4.0],
 
         [self.spinner.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [self.spinner.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
@@ -358,17 +371,24 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     BOOL syncing = self.store.isSyncing;
     NSString *status = nil;
     if (syncing) {
-        status = self.store.syncStatus ?: @"Загрузка каталога…";
+        self.progressView.hidden = NO;
+        [self.progressView setProgress:(float)self.store.syncProgress animated:YES];
+        status = [self.store syncDetailedDescription];
         [self.spinner startAnimating];
     } else {
+        self.progressView.hidden = YES;
+        [self.progressView setProgress:0.0 animated:NO];
         [self.spinner stopAnimating];
         if (!self.items.count) {
             status = self.store.characters.count
                 ? @"Ничего не найдено. Попробуйте другой запрос или жанр."
                 : @"Каталог пуст. Потяните вниз, чтобы повторить загрузку.";
         } else {
-            status = [NSString stringWithFormat:@"%lu %@", (unsigned long)self.items.count,
-                      self.mode == LumiCatalogModeStories ? @"историй" : @"персонажей"];
+            status = [NSString stringWithFormat:@"%lu %@ · каталог загружен (%lu / %lu)",
+                      (unsigned long)self.items.count,
+                      self.mode == LumiCatalogModeStories ? @"историй" : @"персонажей",
+                      (unsigned long)self.store.syncCompletedCount,
+                      (unsigned long)self.store.syncTotalCount];
         }
     }
     self.statusLabel.text = status;
