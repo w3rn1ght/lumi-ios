@@ -31,6 +31,8 @@ extern NSString *const LumiCatalogDidUpdateNotification;
 - (NSString *)syncPercentString;
 /// Percent string for the current phase, e.g. "12%".
 - (NSString *)phasePercentString;
+/// 0.0–1.0 progress of the current phase.
+@property (nonatomic, assign, readonly) double phaseProgress;
 /// "#1 · Персонажи · 37% · 512 / 1380"
 - (NSString *)syncDetailedDescription;
 

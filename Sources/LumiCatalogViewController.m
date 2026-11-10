@@ -372,7 +372,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     NSString *status = nil;
     if (syncing) {
         self.progressView.hidden = NO;
-        [self.progressView setProgress:(float)self.store.syncProgress animated:YES];
+        [self.progressView setProgress:(float)self.store.phaseProgress animated:YES];
         status = [self.store syncDetailedDescription];
         [self.spinner startAnimating];
     } else {

@@ -94,12 +94,26 @@ static const NSUInteger kDetailConcurrency = 6;
                 (unsigned long)self.characters.count, (unsigned long)self.stories.count];
     }
     NSString *phase = self.syncPhase.length ? self.syncPhase : @"Подготовка";
-    if (self.syncTotalCount == 0) {
+    if (self.phaseTotalCount == 0) {
         return [NSString stringWithFormat:@"%@ · получение списка…", phase];
     }
     return [NSString stringWithFormat:@"%@ · %@ · %lu / %lu",
-            phase, [self syncPercentString],
-            (unsigned long)self.syncCompletedCount, (unsigned long)self.syncTotalCount];
+            phase, [self phasePercentString],
+            (unsigned long)self.phaseCompletedCount, (unsigned long)self.phaseTotalCount];
+}
+
+- (double)phaseProgress {
+    if (self.phaseTotalCount == 0) {
+        return 0.0;
+    }
+    double ratio = (double)self.phaseCompletedCount / (double)self.phaseTotalCount;
+    if (ratio > 1.0) {
+        ratio = 1.0;
+    }
+    if (ratio < 0.0) {
+        ratio = 0.0;
+    }
+    return ratio;
 }
 
 - (void)updateProgressWithPhase:(NSString *)phase
