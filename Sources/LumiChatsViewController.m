@@ -5,7 +5,6 @@
 #import "LumiImageLoader.h"
 #import "LumiLoginViewController.h"
 #import "LumiTheme.h"
-#import "LumiWebAuthViewController.h"
 
 @interface LumiSessionCell : UITableViewCell
 @property (nonatomic, strong) UIImageView *thumb;
@@ -235,10 +234,6 @@
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(authChanged)
                                                  name:LumiAuthDidChangeNotification
-                                               object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(authChanged)
-                                                 name:LumiWebAuthDidCompleteNotification
                                                object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(unauthorized)

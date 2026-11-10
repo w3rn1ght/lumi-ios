@@ -277,9 +277,34 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
     }];
 }
 
-- (void)logout {
+- (void)exchangeAppToken:(NSString *)token completion:(void (^)(NSError *))completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                     path:@"/auth/logout"
+                                                     path:@"/auth/app/exchange"
+                                                  baseURL:kAPIBaseURL
+                                                     body:@{@"token": token ?: @""}
+                                                  timeout:30.0];
+    [self performRequest:request completion:^(id result, NSError *error) {
+        if (error) {
+            NSString *message = error.localizedDescription;
+            if ([message containsString:@"app_token_invalid"] || [message containsString:@"истёк"]) {
+                message = @"Ссылка входа истекла. Попробуйте снова.";
+            }
+            completion(error.code == 401 ? error : [NSError errorWithDomain:LumiAPIErrorDomain
+                                                                      code:error.code
+                                                                  userInfo:@{NSLocalizedDescriptionKey: message}]);
+            return;
+        }
+        NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
+        NSDictionary *user = dictionary[@"user"];
+        if ([user isKindOfClass:[NSDictionary class]]) {
+            [self setCurrentUserJSON:user];
+        }
+        completion(nil);
+    }];
+}
+
+- (void)logout {
+    NSMutableURLRequest *request = [self requestWithMethod:@"POST"                                                     path:@"/auth/logout"
                                                   baseURL:kAuthBaseURL
                                                      body:@{}
                                                   timeout:15.0];

@@ -15,7 +15,7 @@ Lumi_CFLAGS += -Wno-unused-variable -Wno-missing-braces -Wno-unused-but-set-vari
                -Wno-constant-logical-operand -Wno-unused-local-typedef -Wno-gnu-folding-constant \
                -Wno-tautological-constant-out-of-range-compare -Wno-format-nonliteral
 Lumi_CFLAGS += -I$(THEOS_PROJECT_DIR)/Vendor/libwebp
-Lumi_FRAMEWORKS := UIKit Foundation SafariServices WebKit
+Lumi_FRAMEWORKS := UIKit Foundation SafariServices WebKit AuthenticationServices
 # libwebp decoder (chromium fork, BSD-3) is vendored under Vendor/libwebp.
 Lumi_CCFLAGS := -I$(THEOS_PROJECT_DIR)/Vendor/libwebp -Wno-unused-function
 Lumi_CCFLAGS += -Wno-sign-compare -Wno-missing-braces -Wno-unused-variable

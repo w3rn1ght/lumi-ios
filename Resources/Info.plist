@@ -26,10 +26,11 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>com.googleusercontent.apps.1032314291008-enums0tts15iutfse3tl0j2jdr8npi75</string>
+			<string>ai.lumi.app.oauth</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.1032314291008-enums0tts15iutfse3tl0j2jdr8npi75</string>
+				<string>ai.lumi.app</string>
+				<string>lumi</string>
 			</array>
 		</dict>
 	</array>

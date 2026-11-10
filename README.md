@@ -12,14 +12,14 @@
 - **Поиск** — по имени, описанию, тегам и автору.
 - **Аватары и обложки WebP** — встроен декодер libwebp, iOS 12 теперь показывает картинки.
 - **Синхронизация чатов** — список и история берутся из аккаунта (`GET /chats`, `GET /chats/{id}/messages`), ответы приходят потоком SSE.
-- **Вход через встроенный браузер** — Google, Discord, Apple, Yandex SmartCaptcha и сброс пароля работают как на сайте; cookies `id.lumi.site` переносятся в приложение.
+- **Вход как в официальном приложении** — OAuth через Google/Discord/Apple в системном окне, затем одноразовый токен меняется на cookie-сессию (`/auth/app/exchange`). Работает на iOS 12, потому что не зависит от JavaScript сайта.
 
 ## Возможности
 
 - Нативный UIKit-интерфейс, тёмная тема, iPhone и iPad.
 - Каталог: персонажи и истории, фильтр по жанрам, поиск.
 - Карточка персонажа/истории: обложка, описание, теги, состав истории, кнопка «Начать чат».
-- Вход по email/паролю нативно и через встроенный браузер (OAuth-провайдеры, капча, сброс пароля).
+- Вход через OAuth-провайдеров в системном окне (Google, Discord, Apple), перенос сессии по одноразовому токену.
 - Список чатов аккаунта с последним сообщением и датой.
 - Чат: история сообщений, отправка, потоковый ответ, удаление свайпом.
 - Профиль: статус сессии, обновление каталога, выход.
@@ -38,7 +38,8 @@
 | Назначение | Метод и путь | База |
 |---|---|---|
 | Проверка сессии | `GET /auth/me` | `https://api.lumi.site` |
-| Вход по email | `POST /auth/login` `{email,password}` | `https://id.lumi.site` |
+| Обмен токена приложения | `POST /auth/app/exchange` `{token}` | `https://api.lumi.site` |
+| Вход по email | `POST /auth/login` `{email,password,captcha_token}` | `https://id.lumi.site` |
 | Выход | `POST /auth/logout` | `https://id.lumi.site` |
 | OAuth (Google/Discord/Apple) | `GET /auth/oauth/{provider}?next=&lang=&app=1` | `https://id.lumi.site` |
 | ID персонажей | `GET /public/characters?limit=1000` | `https://api.lumi.site` |
@@ -56,9 +57,16 @@
 
 Авторизация — cookie (`lumi_access_token`, `lumi_refresh_token`) для домена `.lumi.site`. Cookies хранятся в общем `NSHTTPCookieStorage`, пароль на устройстве не сохраняется.
 
-### Как работает вход через браузер
+### Как работает вход
 
-`WKWebView` открывает `https://lumi.site/login` (или `/register`, `/forgot-password`) с user-agent Safari. Пользователь входит любым способом, включая Google/Discord/Apple и капчу. После успешного входа приложение забирает cookies из `WKWebsiteDataStore`, кладёт их в `NSHTTPCookieStorage` и проверяет сессию через `GET /auth/me`.
+1. Приложение открывает `https://id.lumi.site/auth/oauth/{provider}?next=%2Fhome&lang=ru&app=1` в `ASWebAuthenticationSession` (системное окно входа).
+2. После входа провайдер возвращает управление на `ai.lumi.app://auth-callback?token=…&next=/home` — этот deep link перехватывает приложение (схема `ai.lumi.app` зарегистрирована в `Info.plist`).
+3. Одноразовый `token` отправляется в `POST https://api.lumi.site/auth/app/exchange`; сервер выставляет cookie `lumi_access_token` / `lumi_refresh_token` на домен `.lumi.site`.
+4. Приложение проверяет сессию через `GET /auth/me` и показывает чаты аккаунта.
+
+Это тот же протокол, который использует официальное приложение Lumi (`ai.lumi.app`), поэтому вход не зависит от JavaScript и работает в WebKit iOS 12.
+
+Вход по email/паролю на сайте Lumi защищён Yandex SmartCaptcha, поэтому в приложении он недоступен: для регистрации и сброса пароля есть кнопка «Открыть сайт Lumi».
 
 ### Формат каталога
 
@@ -131,8 +139,8 @@ make package FINALPACKAGE=1
 │   ├── LumiDetailViewController    # карточка персонажа/истории
 │   ├── LumiChatsViewController     # список чатов аккаунта
 │   ├── LumiChatViewController      # чат + потоковый ответ
-│   ├── LumiLoginViewController     # вход: email/пароль + браузер
-│   ├── LumiWebAuthViewController   # WKWebView для OAuth/капчи, перенос cookies
+│   ├── LumiLoginViewController     # вход: провайдеры OAuth
+│   ├── LumiOAuthController.{h,m}   # ASWebAuthenticationSession + deep link + обмен токена
 │   └── LumiProfileViewController   # профиль
 ├── layout/DEBIAN/                  # postinst / postrm (uicache)
 └── .github/workflows/build.yml
@@ -142,7 +150,7 @@ make package FINALPACKAGE=1
 
 - **Каталог грузится по деталям.** Публичный список отдаёт только `id`, поэтому первая загрузка ~1000 персонажей занимает несколько минут (обычно 1–3 мин при 8 потоках) и прогресс виден в статусе. Дальше каталог берётся из кэша.
 - **Нет загрузки изображений и голоса в чат.** Только текст и просмотр.
-- **Cookie-сессия.** Если сервер инвалидирует cookie, потребуется войти снова.
+- **Cookie-сессия.** Если сервер инвалидирует cookie, потребуется войти снова. Email/пароль и сброс пароля в приложении недоступны из-за капчи — используйте сайт.
 - **SSE-ответы** могут быть недоступны, если сеть блокирует длинные соединения; в этом случае сообщение сохранится на сервере, и его можно увидеть после перезагрузки чата.
 - **Декодер WebP** собирается без SIMD-оптимизаций под ARM64 для простоты, скорость декодирования ниже нативной, но для аватаров этого достаточно.
 

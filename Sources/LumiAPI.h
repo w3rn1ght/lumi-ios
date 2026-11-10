@@ -41,6 +41,9 @@ extern NSString *const LumiAuthDidChangeNotification;
 - (void)storeCookies:(NSArray<NSHTTPCookie *> *)cookies;
 - (NSArray<NSHTTPCookie *> *)lumiCookies;
 
+/// Exchanges the one-time deep-link token from the OAuth flow for session cookies.
+- (void)exchangeAppToken:(NSString *)token completion:(void (^)(NSError * _Nullable error))completion;
+
 #pragma mark - Catalog
 
 - (void)fetchCharacterIDsWithCompletion:(LumiAPICompletion)completion;

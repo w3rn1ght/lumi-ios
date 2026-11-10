@@ -4,7 +4,6 @@
 #import "LumiImageLoader.h"
 #import "LumiLoginViewController.h"
 #import "LumiTheme.h"
-#import "LumiWebAuthViewController.h"
 
 @interface LumiProfileViewController ()
 @property (nonatomic, strong) UIImageView *avatarView;
@@ -254,7 +253,7 @@
 
 - (void)aboutTapped {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"О приложении"
-                                                                   message:@"Нативный клиент Lumi для iOS 12.\n\nДанные: api.lumi.site и id.lumi.site.\nВход по email/паролю или через встроенный браузер (Google, Discord, Apple, капча).\nПароль не сохраняется на устройстве.\n\nНеофициальный клиент, не связан с Lumi AI."
+                                                                   message:@"Нативный клиент Lumi для iOS 12.\n\nДанные: api.lumi.site и id.lumi.site.\nВход через OAuth-провайдеров (Google, Discord, Apple) — так же, как в официальном приложении Lumi, после чего сессия переносится в клиент через одноразовый токен.\nПароль не сохраняется на устройстве.\n\nНеофициальный клиент, не связан с Lumi AI."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
