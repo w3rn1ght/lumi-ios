@@ -341,12 +341,9 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
 }
 
 - (void)fetchCharacterWithID:(NSString *)characterID completion:(LumiAPICompletion)completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:[NSString stringWithFormat:@"/public/characters/%@", characterID]
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:25.0];
-    [self performRequest:request completion:completion];
+    [self fetchPublicDetailAtPath:[NSString stringWithFormat:@"/public/characters/%@", characterID]
+                          retries:1
+                       completion:completion];
 }
 
 - (void)fetchStoryIDsWithCompletion:(LumiAPICompletion)completion {
@@ -366,12 +363,29 @@ static NSString *LumiMessageFromPayload(id payload, NSString *fallback) {
 }
 
 - (void)fetchStoryWithID:(NSString *)storyID completion:(LumiAPICompletion)completion {
+    [self fetchPublicDetailAtPath:[NSString stringWithFormat:@"/public/stories/%@", storyID]
+                          retries:1
+                       completion:completion];
+}
+
+- (void)fetchPublicDetailAtPath:(NSString *)path
+                        retries:(NSUInteger)retries
+                     completion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:[NSString stringWithFormat:@"/public/stories/%@", storyID]
+                                                     path:path
                                                   baseURL:kAPIBaseURL
                                                      body:nil
                                                   timeout:25.0];
-    [self performRequest:request completion:completion];
+    [self performRequest:request completion:^(id result, NSError *error) {
+        if (error.code == 429 && retries > 0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [self fetchPublicDetailAtPath:path retries:retries - 1 completion:completion];
+            });
+            return;
+        }
+        completion(result, error);
+    }];
 }
 
 - (void)fetchTagsWithCompletion:(LumiAPICompletion)completion {

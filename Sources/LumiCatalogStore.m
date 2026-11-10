@@ -5,7 +5,7 @@ NSString *const LumiCatalogDidUpdateNotification = @"LumiCatalogDidUpdateNotific
 
 static NSString *const kCatalogFileName = @"catalog-v2.json";
 static const NSTimeInterval kCatalogMaxAge = 12 * 60 * 60;
-static const NSUInteger kDetailConcurrency = 8;
+static const NSUInteger kDetailConcurrency = 6;
 
 @interface LumiCatalogStore ()
 @property (nonatomic, copy, readwrite) NSArray<NSDictionary *> *characters;

@@ -4,7 +4,7 @@
 
 > Неофициальный клиент. Не связан с Lumi AI. Используйте на свой риск.
 
-## Что нового в 1.3.0
+## Что нового в 1.3.1
 
 - **Полный каталог персонажей** — все ~1000 персонажей подгружаются из `api.lumi.site` и кэшируются на диск.
 - **Истории** — отдельная вкладка со всеми ~380 историями, включая состав персонажей.
@@ -86,7 +86,7 @@
    - через **Filza** — тап по `.deb` → Install;
    - по SSH:
      ```sh
-     dpkg -i com.w3rn1ght.lumi_1.3.0_iphoneos-arm.deb
+     dpkg -i com.w3rn1ght.lumi_1.3.1_iphoneos-arm.deb
      uicache -p /Applications/Lumi.app
      ```
 3. Если иконка не появилась — `uicache` или respring.
@@ -119,7 +119,7 @@ cd /path/to/lumi-ios
 make package FINALPACKAGE=1
 ```
 
-Готовый файл: `packages/com.w3rn1ght.lumi_1.3.0_iphoneos-arm.deb`.
+Готовый файл: `packages/com.w3rn1ght.lumi_1.3.1_iphoneos-arm.deb`.
 
 ## Структура
 
