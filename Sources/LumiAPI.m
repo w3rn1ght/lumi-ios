@@ -578,6 +578,15 @@ static NSString *LumiEncodePath(NSString *path) {
     }];
 }
 
+- (void)fetchCatalogDetailWithKind:(NSString *)kind
+                        identifier:(NSString *)identifier
+             includeFailureStatus:(BOOL)includeFailureStatus
+                        completion:(LumiAPICompletion)completion {
+    [self fetchDetailWithPublicPath:[NSString stringWithFormat:@"/public/%@/%@", kind, identifier]
+                  authenticatedPath:[NSString stringWithFormat:@"/%@/%@", kind, identifier]
+                         completion:completion];
+}
+
 - (void)fetchTagsWithCompletion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                      path:@"/tags"
