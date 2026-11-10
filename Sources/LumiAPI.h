@@ -89,4 +89,12 @@ extern NSString *const LumiAuthDidChangeNotification;
 - (void)cancel;
 @end
 
+/// Bulk catalog helper used by LumiCatalogStore.
+@interface LumiAPI (LumiCatalogDetail)
+- (void)fetchCatalogDetailWithKind:(NSString *)kind
+                        identifier:(NSString *)identifier
+             includeFailureStatus:(BOOL)includeFailureStatus
+                        completion:(LumiAPICompletion)completion;
+@end
+
 NS_ASSUME_NONNULL_END
