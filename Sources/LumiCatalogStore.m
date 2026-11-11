@@ -1,5 +1,7 @@
 #import "LumiCatalogStore.h"
 #import "LumiAPI.h"
+#import "LumiSafe.h"
+#import "LumiDiagnostics.h"
 
 NSString *const LumiCatalogDidUpdateNotification = @"LumiCatalogDidUpdateNotification";
 
@@ -37,6 +39,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 @property (nonatomic, strong, nullable) NSDate *savedAt;
 @property (nonatomic, assign) BOOL started;
 @property (nonatomic, strong) dispatch_queue_t stateQueue;
+@property (nonatomic, strong) dispatch_queue_t cacheQueue;
+@property (nonatomic, assign) BOOL notifyScheduled;
+@property (nonatomic, assign) NSTimeInterval lastNotifyTime;
 @end
 
 @implementation LumiCatalogStore
@@ -233,6 +238,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 }
 
 - (void)saveCache {
+    // Snapshot on the caller's thread (the arrays are immutable copies), then
+    // serialise ~9 MB of JSON off the main thread. Doing this on the main queue
+    // froze the interface for seconds at a time.
     NSDictionary *dictionary = @{
         @"saved_at": @([[NSDate date] timeIntervalSince1970]),
         @"characters": self.characters ?: @[],
@@ -240,11 +248,17 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         @"character_tags": self.characterTags ?: @[],
         @"story_tags": self.storyTags ?: @[],
     };
-    NSData *data = [NSJSONSerialization dataWithJSONObject:dictionary options:0 error:NULL];
-    if (data) {
-        [data writeToFile:[self cachePath] atomically:YES];
-        self.savedAt = [NSDate date];
+    self.savedAt = [NSDate date];
+    if (!self.cacheQueue) {
+        self.cacheQueue = dispatch_queue_create("com.w3rn1ght.lumi.catalog.cache", DISPATCH_QUEUE_SERIAL);
     }
+    NSString *path = [self cachePath];
+    dispatch_async(self.cacheQueue, ^{
+        NSData *data = [NSJSONSerialization dataWithJSONObject:dictionary options:0 error:NULL];
+        if (data) {
+            [data writeToFile:path atomically:YES];
+        }
+    });
 }
 
 - (BOOL)isStale {
@@ -254,7 +268,33 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     return -[self.savedAt timeIntervalSinceNow] > kCatalogMaxAge;
 }
 
+/// Crowds of catalog events must not flood the main queue: each notification
+/// makes the catalog list re-filter and re-sort 1000+ entries. Posting at most
+/// four times per second keeps the UI (and the progress bar) alive while the
+/// ~1400 detail requests are still streaming in.
 - (void)notifyUpdate {
+    @synchronized (self) {
+        if (self.notifyScheduled) {
+            return;
+        }
+        self.notifyScheduled = YES;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @synchronized (self) {
+            self.notifyScheduled = NO;
+            self.lastNotifyTime = [NSDate timeIntervalSinceReferenceDate];
+        }
+        [[NSNotificationCenter defaultCenter] postNotificationName:LumiCatalogDidUpdateNotification
+                                                            object:self];
+    });
+}
+
+/// Immediate variant used for terminal states (finished / failed).
+- (void)notifyUpdateNow {
+    @synchronized (self) {
+        self.notifyScheduled = NO;
+    }
     [[NSNotificationCenter defaultCenter] postNotificationName:LumiCatalogDidUpdateNotification object:self];
 }
 
@@ -267,6 +307,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.started = YES;
     [self loadCache];
     [self notifyUpdate];
+    [LumiDiagnostics log:@"каталог: кэш %lu персонажей / %lu историй, устарел: %d",
+     (unsigned long)self.characters.count, (unsigned long)self.stories.count, self.isStale];
     if (self.isStale || self.characters.count < 100) {
         [self forceRefresh];
     }
@@ -331,7 +373,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.syncStatus = message;
     self.syncFailedCount = 1;
     NSLog(@"[Lumi] catalog sync failed: %@", message);
-    [self notifyUpdate];
+    [LumiDiagnostics log:@"каталог: ошибка — %@", message];
+    [self saveCache];
+    [self notifyUpdateNow];
 }
 
 - (void)startSyncWithPhase:(NSString *)phase {
@@ -350,7 +394,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.syncedCharacterCount = 0;
     self.syncedStoryCount = 0;
     self.syncProgress = 0.0;
-    [self notifyUpdate];
+    [self notifyUpdateNow];
 }
 
 - (NSArray<NSDictionary *> *)currentCharacterIDs {
@@ -443,6 +487,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         [self recalculateProgress];
         [self notifyUpdate];
         NSLog(@"[Lumi] catalog: %lu ids, %lu missing details", (unsigned long)ids.count, (unsigned long)missing.count);
+        [LumiDiagnostics log:@"каталог: %lu персонажей, загрузить %lu",
+         (unsigned long)ids.count, (unsigned long)missing.count];
 
         if (!missing.count) {
             [self syncStoryIDs];
@@ -553,9 +599,11 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.syncPhase = nil;
     self.syncStatus = nil;
     [self saveCache];
-    [self notifyUpdate];
     NSLog(@"[Lumi] catalog sync finished: %lu characters, %lu stories",
           (unsigned long)self.characters.count, (unsigned long)self.stories.count);
+    [LumiDiagnostics log:@"каталог: готово — %lu персонажей / %lu историй",
+     (unsigned long)self.characters.count, (unsigned long)self.stories.count];
+    [self notifyUpdateNow];
 }
 
 /// Runs a fixed number of workers (no thread blocking) so 1000+ requests cannot
@@ -586,7 +634,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSString *phase = kind == LumiCatalogSyncKindCharacter ? @"Персонажи" : @"Истории";
     NSString *kindSlug = kind == LumiCatalogSyncKindCharacter ? @"characters" : @"stories";
     NSUInteger reportEvery = kind == LumiCatalogSyncKindCharacter ? 5 : 4;
-    NSUInteger saveEvery = kind == LumiCatalogSyncKindCharacter ? 150 : 100;
+    NSUInteger saveEvery = kind == LumiCatalogSyncKindCharacter ? 50 : 40;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         weakSelf.syncFailedCount = 0;
@@ -606,6 +654,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             nextIndex += 1;
             inFlight += 1;
             LumiAPICompletion handler = ^(id result, NSError *error) {
+                if (finished) {
+                    return;
+                }
                 BOOL ok = [result isKindOfClass:[NSDictionary class]];
                 if (ok) {
                     if (kind == LumiCatalogSyncKindCharacter) {
@@ -665,6 +716,10 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                                 [strongSelf saveCache];
                             });
                         }
+                        if (doneSnapshot % 100 < reportEvery) {
+                            [LumiDiagnostics log:@"%@: %lu / %lu", phase,
+                             (unsigned long)doneSnapshot, (unsigned long)totalSnapshot];
+                        }
                     }
                     if (completed == total) {
                         if (finished) {
@@ -691,33 +746,79 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     };
     weakPump = pump;
     dispatch_async(scheduler, pump);
-    (void)total;
+
+    // Watchdog: a single hung TCP/TLS request must not freeze the whole
+    // download forever (iOS sometimes waits minutes on a dead handshake).
+    // If nothing completes for ~45 s, stop and report the remainder as failed
+    // so the user can retry with pull-to-refresh.
+    __block NSUInteger lastCompleted = 0;
+    __block NSUInteger stallTicks = 0;
+    __block __weak void (^weakWatchdog)(void);
+    __block void (^watchdog)(void);
+    watchdog = ^{
+        if (finished) {
+            return;
+        }
+        if (completed != lastCompleted) {
+            lastCompleted = completed;
+            stallTicks = 0;
+        } else {
+            stallTicks += 1;
+        }
+        if (stallTicks >= 9) {
+            finished = YES;
+            NSUInteger missing = total > completed ? total - completed : 0;
+            NSUInteger failedFinal = failed + missing;
+            NSLog(@"[Lumi] catalog watchdog: %lu of %lu details unfinished",
+                  (unsigned long)missing, (unsigned long)total);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(failedFinal);
+            });
+            return;
+        }
+        void (^nextWatchdog)(void) = weakWatchdog;
+        if (nextWatchdog) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                           scheduler, nextWatchdog);
+        }
+    };
+    weakWatchdog = watchdog;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                   scheduler, watchdog);
 }
 
 #pragma mark - Detail handling
 
 - (void)addCharacterDetail:(NSDictionary *)detail {
-    NSString *identifier = detail[@"id"];
-    if (![identifier isKindOfClass:[NSString class]]) {
+    if (![detail isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+    NSString *identifier = LumiAsString(LumiValue(detail, @"id"));
+    if (!identifier.length) {
         return;
     }
     NSMutableDictionary *entry = [NSMutableDictionary dictionary];
     entry[@"id"] = identifier;
-    entry[@"name"] = detail[@"name"] ?: @"Персонаж";
-    if (detail[@"avatar_url"]) {
-        entry[@"avatar_url"] = detail[@"avatar_url"];
+    entry[@"name"] = LumiAsString(LumiValue(detail, @"name")) ?: @"Персонаж";
+    NSString *avatar = LumiAsString(LumiValue(detail, @"avatar_url"));
+    if (avatar.length) {
+        entry[@"avatar_url"] = avatar;
     }
-    if (detail[@"tagline"]) {
-        entry[@"tagline"] = detail[@"tagline"];
+    NSString *tagline = LumiAsString(LumiValue(detail, @"tagline"));
+    if (tagline.length) {
+        entry[@"tagline"] = tagline;
     }
-    if ([detail[@"tags"] isKindOfClass:[NSArray class]]) {
-        entry[@"tags"] = detail[@"tags"];
+    NSArray *tags = LumiAsArray(LumiValue(detail, @"tags"));
+    if (tags.count) {
+        entry[@"tags"] = tags;
     }
-    if ([detail[@"message_count"] isKindOfClass:[NSNumber class]]) {
-        entry[@"message_count"] = detail[@"message_count"];
+    NSNumber *messageCount = LumiAsNumber(LumiValue(detail, @"message_count"));
+    if (messageCount) {
+        entry[@"message_count"] = messageCount;
     }
-    if (detail[@"owner"][@"username"]) {
-        entry[@"owner"] = @{@"username": detail[@"owner"][@"username"]};
+    NSString *ownerName = LumiNestedString(detail, @"owner", @"username");
+    if (ownerName.length) {
+        entry[@"owner"] = @{@"username": ownerName};
     }
     [self performState:^{
         NSMutableArray *characters = [self.characters mutableCopy] ?: [NSMutableArray array];
@@ -738,33 +839,41 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 }
 
 - (void)addStoryDetail:(NSDictionary *)detail {
-    NSString *identifier = detail[@"id"];
-    if (![identifier isKindOfClass:[NSString class]]) {
+    if (![detail isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+    NSString *identifier = LumiAsString(LumiValue(detail, @"id"));
+    if (!identifier.length) {
         return;
     }
     NSMutableDictionary *entry = [NSMutableDictionary dictionary];
     entry[@"id"] = identifier;
-    entry[@"title"] = detail[@"title"] ?: @"История";
-    if (detail[@"avatar_url"]) {
-        entry[@"avatar_url"] = detail[@"avatar_url"];
+    entry[@"title"] = LumiAsString(LumiValue(detail, @"title")) ?: @"История";
+    NSString *avatar = LumiAsString(LumiValue(detail, @"avatar_url"));
+    if (avatar.length) {
+        entry[@"avatar_url"] = avatar;
     }
-    NSString *description = detail[@"description"];
-    if ([description isKindOfClass:[NSString class]] && description.length > 400) {
+    NSString *description = LumiAsString(LumiValue(detail, @"description"));
+    if (description.length > 400) {
         description = [[description substringToIndex:400] stringByAppendingString:@"…"];
     }
     if (description.length) {
         entry[@"description"] = description;
     }
-    if ([detail[@"tags"] isKindOfClass:[NSArray class]]) {
-        entry[@"tags"] = detail[@"tags"];
+    NSArray *tags = LumiAsArray(LumiValue(detail, @"tags"));
+    if (tags.count) {
+        entry[@"tags"] = tags;
     }
-    if ([detail[@"message_count"] isKindOfClass:[NSNumber class]]) {
-        entry[@"message_count"] = detail[@"message_count"];
+    NSNumber *messageCount = LumiAsNumber(LumiValue(detail, @"message_count"));
+    if (messageCount) {
+        entry[@"message_count"] = messageCount;
     }
-    if ([detail[@"cast_members"] isKindOfClass:[NSArray class]]) {
+    NSArray *castMembers = LumiAsArray(LumiValue(detail, @"cast_members"));
+    if (castMembers) {
         NSMutableArray *cast = [NSMutableArray array];
-        for (NSDictionary *member in detail[@"cast_members"]) {
-            if (![member isKindOfClass:[NSDictionary class]]) {
+        for (id memberObject in castMembers) {
+            NSDictionary *member = LumiAsDictionary(memberObject);
+            if (!member) {
                 continue;
             }
             NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
@@ -783,8 +892,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         }
         entry[@"cast"] = cast;
     }
-    if ([detail[@"owner"] isKindOfClass:[NSDictionary class]] && detail[@"owner"][@"username"]) {
-        entry[@"owner"] = @{@"username": detail[@"owner"][@"username"]};
+    NSString *ownerName = LumiNestedString(detail, @"owner", @"username");
+    if (ownerName.length) {
+        entry[@"owner"] = @{@"username": ownerName};
     }
     [self performState:^{
         NSMutableArray *stories = [self.stories mutableCopy] ?: [NSMutableArray array];
@@ -805,13 +915,22 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 }
 
 - (NSArray *)sortedCharacters:(NSArray *)characters {
-    return [characters sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
-        NSInteger leftCount = [left[@"message_count"] integerValue];
-        NSInteger rightCount = [right[@"message_count"] integerValue];
+    return [characters sortedArrayUsingComparator:^NSComparisonResult(id leftObject, id rightObject) {
+        NSDictionary *left = LumiAsDictionary(leftObject);
+        NSDictionary *right = LumiAsDictionary(rightObject);
+        if (!left || !right) {
+            return NSOrderedSame;
+        }
+        NSInteger leftCount = [LumiAsNumber(LumiValue(left, @"message_count")) integerValue];
+        NSInteger rightCount = [LumiAsNumber(LumiValue(right, @"message_count")) integerValue];
         if (leftCount != rightCount) {
             return leftCount > rightCount ? NSOrderedAscending : NSOrderedDescending;
         }
-        return [(NSString *)left[@"name"] compare:(NSString *)right[@"name"] ?: @""];
+        NSString *leftName = LumiAsString(LumiValue(left, @"name"))
+            ?: LumiAsString(LumiValue(left, @"title")) ?: @"";
+        NSString *rightName = LumiAsString(LumiValue(right, @"name"))
+            ?: LumiAsString(LumiValue(right, @"title")) ?: @"";
+        return [leftName localizedCaseInsensitiveCompare:rightName];
     }];
 }
 
@@ -834,8 +953,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSMutableArray *result = [NSMutableArray array];
     for (NSDictionary *item in sorted) {
         if (filterTag) {
-            NSArray *tags = item[@"tags"];
-            if (![tags isKindOfClass:[NSArray class]] || ![tags containsObject:tag]) {
+            NSArray *tags = LumiAsArray(LumiValue(item, @"tags"));
+            if (!tags || ![tags containsObject:tag]) {
                 continue;
             }
         }
@@ -862,9 +981,11 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                     }
                 }
             }
-            if (!matched && [item[@"owner"][@"username"] isKindOfClass:[NSString class]]) {
-                NSString *owner = [item[@"owner"][@"username"] lowercaseString];
-                matched = [owner rangeOfString:lowercaseQuery].location != NSNotFound;
+            if (!matched) {
+                NSString *owner = LumiNestedString(item, @"owner", @"username");
+                if (owner.length) {
+                    matched = [[owner lowercaseString] rangeOfString:lowercaseQuery].location != NSNotFound;
+                }
             }
             if (!matched) {
                 continue;

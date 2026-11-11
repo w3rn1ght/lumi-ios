@@ -159,6 +159,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
 @property (nonatomic, copy) NSString *selectedTag;
 @property (nonatomic, copy) NSArray<NSDictionary *> *items;
 @property (nonatomic, assign) LumiCatalogMode mode;
+@property (nonatomic, copy, nullable) NSString *lastContentSignature;
 @end
 
 @implementation LumiCatalogViewController
@@ -365,18 +366,37 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
 
 - (void)catalogUpdated {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self reloadItems];
+        [self refreshFromStore];
     });
 }
 
 - (void)reloadItems {
+    self.lastContentSignature = nil;
+    [self refreshFromStore];
+}
+
+/// Recomputes the visible list and the progress text. The table is only
+/// rebuilt when the visible set actually changed: during a catalog sync the
+/// store emits events several times per second and reloading 1000 rows each
+/// time made the app look frozen at 1%.
+- (void)refreshFromStore {
     NSString *query = self.searchBar.text ?: @"";
-    if (self.mode == LumiCatalogModeStories) {
-        self.items = [self.store storiesMatchingQuery:query tag:self.selectedTag];
-    } else {
-        self.items = [self.store charactersMatchingQuery:query tag:self.selectedTag];
+    NSArray *items = self.mode == LumiCatalogModeStories
+        ? [self.store storiesMatchingQuery:query tag:self.selectedTag]
+        : [self.store charactersMatchingQuery:query tag:self.selectedTag];
+    NSString *signature = [NSString stringWithFormat:@"%ld|%@|%@|%lu|%lu|%lu",
+                           (long)self.mode,
+                           self.selectedTag ?: @"",
+                           query,
+                           (unsigned long)items.count,
+                           (unsigned long)self.store.characters.count,
+                           (unsigned long)self.store.stories.count];
+    BOOL needsReload = ![signature isEqualToString:self.lastContentSignature ?: @""];
+    self.items = items;
+    self.lastContentSignature = signature;
+    if (needsReload) {
+        [self.tableView reloadData];
     }
-    [self.tableView reloadData];
 
     BOOL syncing = self.store.isSyncing;
     NSString *status = nil;

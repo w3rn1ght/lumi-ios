@@ -170,6 +170,10 @@ static NSString *LumiEncodePath(NSString *path) {
 @property (nonatomic, strong, readwrite, nullable) NSString *accessToken;
 @property (nonatomic, strong, readwrite, nullable) NSString *refreshToken;
 @property (nonatomic, strong) NSURLSession *session;
+- (void)fetchCatalogDetailWithKind:(NSString *)kind
+                        identifier:(NSString *)identifier
+                           attempt:(NSUInteger)attempt
+                        completion:(LumiAPICompletion)completion;
 @end
 
 @implementation LumiAPI
@@ -192,7 +196,7 @@ static NSString *LumiEncodePath(NSString *path) {
         configuration.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
         configuration.HTTPShouldSetCookies = YES;
         configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        configuration.HTTPMaximumConnectionsPerHost = 4;
+        configuration.HTTPMaximumConnectionsPerHost = 8;
         configuration.HTTPAdditionalHeaders = @{
             @"Accept": @"application/json",
             @"Accept-Language": @"ru,en;q=0.8",
@@ -541,13 +545,68 @@ static NSString *LumiEncodePath(NSString *path) {
     }];
 }
 
+#pragma mark - Catalog detail (off-main)
+
+/// Bulk catalog loading issues ~1400 requests. The generic `performRequest:`
+/// always hops to the main queue, which turned the detail download into a
+/// crawl and froze the progress bar. This variant parses and delivers on the
+/// session's own queue, retries a bounded number of times and never retries
+/// forever (the old 429 path could loop indefinitely).
 - (void)fetchCatalogDetailWithKind:(NSString *)kind
                         identifier:(NSString *)identifier
              includeFailureStatus:(BOOL)includeFailureStatus
                         completion:(LumiAPICompletion)completion {
-    [self fetchDetailWithPublicPath:[NSString stringWithFormat:@"/public/%@/%@", kind, identifier]
-                  authenticatedPath:[NSString stringWithFormat:@"/%@/%@", kind, identifier]
-                         completion:completion];
+    [self fetchCatalogDetailWithKind:kind
+                          identifier:identifier
+                             attempt:0
+                          completion:completion];
+}
+
+- (void)fetchCatalogDetailWithKind:(NSString *)kind
+                        identifier:(NSString *)identifier
+                           attempt:(NSUInteger)attempt
+                        completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/public/%@/%@", kind, identifier];
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                     path:path
+                                                  baseURL:kAPIBaseURL
+                                                     body:nil
+                                                  timeout:15.0];
+    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request
+                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger status = http ? http.statusCode : 0;
+        id json = nil;
+        if (data.length) {
+            json = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+        }
+        if (!error && status >= 200 && status < 300 && [json isKindOfClass:[NSDictionary class]]) {
+            completion(json, nil);
+            return;
+        }
+
+        NSUInteger maxAttempts = (status == 429) ? 4 : 2;
+        BOOL retryable = (error != nil || status == 429 || status >= 500 || status == 0);
+        if (retryable && attempt + 1 < maxAttempts) {
+            double delay = 0.5;
+            if (status == 429) {
+                delay = (double)(1 << MIN(attempt, (NSUInteger)4));
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                [self fetchCatalogDetailWithKind:kind
+                                      identifier:identifier
+                                         attempt:attempt + 1
+                                      completion:completion];
+            });
+            return;
+        }
+
+        NSString *message = status ? [NSString stringWithFormat:@"HTTP %ld", (long)status]
+                                   : (error.localizedDescription ?: @"Сетевая ошибка");
+        completion(json, LumiError(status ?: 500, message));
+    }];
+    [task resume];
 }
 
 - (void)fetchTagsWithCompletion:(LumiAPICompletion)completion {

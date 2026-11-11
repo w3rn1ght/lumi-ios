@@ -3,6 +3,8 @@
 #import "LumiCatalogStore.h"
 #import "LumiImageLoader.h"
 #import "LumiRichText.h"
+#import "LumiSafe.h"
+#import "LumiDiagnostics.h"
 #import "LumiTheme.h"
 
 #pragma mark - Photo view
@@ -51,11 +53,15 @@
 @interface LumiMessageCell : UITableViewCell
 @property (nonatomic, strong) UIView *bubble;
 @property (nonatomic, strong) UILabel *bubbleLabel;
-@property (nonatomic, strong) LumiPhotoView *photoView;
+@property (nonatomic, strong) UIStackView *photoStack;
+@property (nonatomic, strong) NSArray<LumiPhotoView *> *photoViews;
 @property (nonatomic, strong) NSLayoutConstraint *leadingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *trailingConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *photoHeightConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *photoStackHeightConstraint;
 @end
+
+static const CGFloat kLumiPhotoCellHeight = 168.0;
+static const NSUInteger kLumiPhotosPerMessage = 4;
 
 @implementation LumiMessageCell
 
@@ -76,12 +82,25 @@
         self.bubbleLabel.numberOfLines = 0;
         [self.bubble addSubview:self.bubbleLabel];
 
-        self.photoView = [[LumiPhotoView alloc] initWithFrame:CGRectZero];
-        [self.bubble addSubview:self.photoView];
+        self.photoStack = [[UIStackView alloc] init];
+        self.photoStack.translatesAutoresizingMaskIntoConstraints = NO;
+        self.photoStack.axis = UILayoutConstraintAxisVertical;
+        self.photoStack.spacing = 6.0;
+        self.photoStack.hidden = YES;
+        [self.bubble addSubview:self.photoStack];
+
+        NSMutableArray *views = [NSMutableArray array];
+        for (NSUInteger index = 0; index < kLumiPhotosPerMessage; index++) {
+            LumiPhotoView *photo = [[LumiPhotoView alloc] initWithFrame:CGRectZero];
+            [photo.heightAnchor constraintEqualToConstant:kLumiPhotoCellHeight].active = YES;
+            [self.photoStack addArrangedSubview:photo];
+            [views addObject:photo];
+        }
+        self.photoViews = views;
 
         self.leadingConstraint = [self.bubble.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14.0];
         self.trailingConstraint = [self.bubble.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14.0];
-        self.photoHeightConstraint = [self.photoView.heightAnchor constraintEqualToConstant:0.0];
+        self.photoStackHeightConstraint = [self.photoStack.heightAnchor constraintEqualToConstant:0.0];
 
         [NSLayoutConstraint activateConstraints:@[
             [self.bubble.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4.0],
@@ -91,11 +110,11 @@
             [self.bubbleLabel.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:13.0],
             [self.bubbleLabel.trailingAnchor constraintEqualToAnchor:self.bubble.trailingAnchor constant:-13.0],
 
-            [self.photoView.topAnchor constraintEqualToAnchor:self.bubbleLabel.bottomAnchor constant:6.0],
-            [self.photoView.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:8.0],
-            [self.photoView.trailingAnchor constraintEqualToAnchor:self.bubble.trailingAnchor constant:-8.0],
-            [self.photoView.bottomAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:-8.0],
-            self.photoHeightConstraint,
+            [self.photoStack.topAnchor constraintEqualToAnchor:self.bubbleLabel.bottomAnchor constant:6.0],
+            [self.photoStack.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:8.0],
+            [self.photoStack.trailingAnchor constraintEqualToAnchor:self.bubble.trailingAnchor constant:-8.0],
+            [self.photoStack.bottomAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:-8.0],
+            self.photoStackHeightConstraint,
         ]];
     }
     return self;
@@ -105,45 +124,95 @@
     [super prepareForReuse];
     self.bubbleLabel.attributedText = nil;
     self.bubbleLabel.text = nil;
-    self.photoView.photoURL = nil;
-    self.photoHeightConstraint.constant = 0.0;
-    self.photoView.hidden = YES;
+    for (LumiPhotoView *photo in self.photoViews) {
+        photo.photoURL = nil;
+    }
+    self.photoStack.hidden = YES;
+    self.photoStackHeightConstraint.constant = 0.0;
 }
 
 - (void)configureWithText:(NSString *)text
                    isUser:(BOOL)isUser
                   pending:(BOOL)pending
-                 photoURL:(NSString *)photoURL {
+                photoURLs:(NSArray<NSString *> *)photoURLs {
     UIColor *textColor = isUser ? [UIColor whiteColor] : LumiTextColor();
     UIFont *baseFont = LumiFont(15.0, UIFontWeightRegular);
     NSString *displayText = text.length ? text : (pending ? @"…" : @"");
-    NSMutableString *visible = [[LumiRichTextRenderer stringByStrippingImageMarkers:displayText] mutableCopy];
-    if (photoURL.length && visible.length == 0) {
-        visible = [@"" mutableCopy];
-    }
+    NSString *visible = [LumiRichTextRenderer stringByStrippingImageMarkers:displayText] ?: @"";
     self.bubbleLabel.attributedText = [LumiRichTextRenderer attributedStringForText:visible
                                                                          textColor:textColor
                                                                           baseFont:baseFont
                                                                  prefixCommandName:@"**"];
+    self.bubbleLabel.hidden = visible.length == 0 && photoURLs.count == 0;
 
     self.bubble.backgroundColor = isUser ? LumiAccentColor() : LumiSurfaceColor();
     self.leadingConstraint.active = !isUser;
     self.trailingConstraint.active = isUser;
 
-    if (photoURL.length) {
-        self.photoView.hidden = NO;
-        self.photoHeightConstraint.constant = 200.0;
-        self.photoView.photoURL = photoURL;
+    NSUInteger count = MIN(photoURLs.count, kLumiPhotosPerMessage);
+    for (NSUInteger index = 0; index < self.photoViews.count; index++) {
+        LumiPhotoView *photo = self.photoViews[index];
+        BOOL used = index < count;
+        photo.hidden = !used;
+        photo.photoURL = used ? photoURLs[index] : nil;
+    }
+    if (count > 0) {
+        self.photoStack.hidden = NO;
+        self.photoStackHeightConstraint.constant = count * kLumiPhotoCellHeight + (count - 1) * 6.0;
     } else {
-        self.photoView.hidden = YES;
-        self.photoHeightConstraint.constant = 0.0;
-        self.photoView.photoURL = nil;
+        self.photoStack.hidden = YES;
+        self.photoStackHeightConstraint.constant = 0.0;
     }
 }
 
 @end
 
 #pragma mark - Chat
+
+static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSString *content) {
+    NSMutableOrderedSet *urls = [NSMutableOrderedSet orderedSet];
+
+    void (^addIfURL)(id) = ^(id value) {
+        NSString *string = LumiStringValue(value);
+        if (string.length && ([string hasPrefix:@"http://"] || [string hasPrefix:@"https://"])) {
+            [urls addObject:string];
+        }
+    };
+
+    for (NSString *key in @[@"image_url", @"photo_url", @"image", @"photo", @"media_url", @"attachment_url"]) {
+        addIfURL(LumiValue(message, key));
+    }
+    for (NSString *key in @[@"attachments", @"photos", @"images", @"media", @"files"]) {
+        NSArray *items = LumiAsArray(LumiValue(message, key));
+        for (id item in items) {
+            if ([item isKindOfClass:[NSString class]]) {
+                addIfURL(item);
+                continue;
+            }
+            NSDictionary *dictionary = LumiAsDictionary(item);
+            if (!dictionary) {
+                continue;
+            }
+            NSString *kind = [LumiAsString(LumiValue(dictionary, @"type"))
+                              ?: LumiAsString(LumiValue(dictionary, @"kind")) lowercaseString];
+            if (kind.length && !([kind containsString:@"image"] || [kind containsString:@"photo"] ||
+                                 [kind containsString:@"gif"] || [kind containsString:@"webp"])) {
+                continue;
+            }
+            addIfURL(LumiValue(dictionary, @"url"));
+            addIfURL(LumiValue(dictionary, @"src"));
+            addIfURL(LumiValue(dictionary, @"photo_url"));
+            addIfURL(LumiValue(dictionary, @"file_url"));
+            if (!kind.length && !LumiAsString(LumiValue(dictionary, @"url")).length) {
+                addIfURL(LumiValue(dictionary, @"id"));
+            }
+        }
+    }
+    for (NSString *url in [LumiRichTextRenderer imageURLsInText:content]) {
+        [urls addObject:url];
+    }
+    return urls.array;
+}
 
 @interface LumiChatViewController () <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) NSDictionary *chat;
@@ -174,13 +243,13 @@
         _chat = [self normalizedChat:chat];
         _chatID = [self chatIdentifierFromChat:chat] ?: @"";
         _messages = [NSMutableArray array];
+        NSDictionary *safeItem = LumiAsDictionary(item) ?: @{};
         if (kind == LumiDetailKindStory) {
-            _chatTitle = item[@"title"] ?: _chat[@"title"];
-            _avatarURL = item[@"avatar_url"];
+            _chatTitle = LumiAsString(safeItem[@"title"]) ?: LumiAsString(_chat[@"title"]);
         } else {
-            _chatTitle = item[@"name"] ?: _chat[@"title"];
-            _avatarURL = item[@"avatar_url"];
+            _chatTitle = LumiAsString(safeItem[@"name"]) ?: LumiAsString(_chat[@"title"]);
         }
+        _avatarURL = LumiAsString(safeItem[@"avatar_url"]);
     }
     return self;
 }
@@ -188,7 +257,7 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = LumiBackgroundColor();
-    self.title = self.chatTitle.length ? self.chatTitle : @"";
+    [self refreshNavigationTitle];
 
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -288,6 +357,8 @@
                                                  name:UIKeyboardWillHideNotification
                                                object:nil];
 
+    [LumiDiagnostics log:@"чат %@: открыт (%@), сообщений в списке: %lu",
+     self.chatID, self.chatTitle ?: @"без названия", (unsigned long)self.messages.count];
     [self loadMessages];
 }
 
@@ -296,24 +367,52 @@
     [self.stream cancel];
 }
 
+- (void)refreshNavigationTitle {
+    NSString *name = self.chatTitle.length ? self.chatTitle : @"";
+    if (self.chatNumber > 0) {
+        self.title = [NSString stringWithFormat:@"%@ · чат №%lu", name, (unsigned long)self.chatNumber];
+    } else {
+        self.title = name;
+    }
+}
+
 #pragma mark - Chat parsing
 
 - (NSString *)chatIdentifierFromChat:(NSDictionary *)chat {
-    id identifier = chat[@"id"] ?: chat[@"chat_id"];
-    return [identifier isKindOfClass:[NSString class]] ? identifier : nil;
+    for (NSString *key in @[@"id", @"chat_id", @"session_id"]) {
+        NSString *value = LumiAsString(LumiValue(chat, key));
+        if (value.length) {
+            return value;
+        }
+    }
+    return nil;
 }
 
 - (NSDictionary *)normalizedChat:(NSDictionary *)chat {
-    if (![chat isKindOfClass:[NSDictionary class]]) {
+    NSDictionary *dictionary = LumiAsDictionary(chat);
+    if (!dictionary) {
         return @{};
     }
-    NSMutableDictionary *result = [chat mutableCopy];
-    NSDictionary *nested = chat[@"chat"];
-    if (![nested isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *target = chat[@"target"];
-        if ([target isKindOfClass:[NSDictionary class]]) {
-            result[@"title"] = chat[@"title"] ?: target[@"name"];
-            result[@"avatar_url"] = target[@"avatar_url"];
+    NSMutableDictionary *result = [dictionary mutableCopy];
+    NSDictionary *nested = LumiAsDictionary(LumiValue(dictionary, @"chat"));
+    if (nested) {
+        if (!LumiAsString(result[@"title"]).length) {
+            NSString *title = LumiAsString(nested[@"title"]) ?: LumiNestedString(nested, @"target", @"name");
+            if (title.length) {
+                result[@"title"] = title;
+            }
+        }
+        return result;
+    }
+    NSDictionary *target = LumiAsDictionary(LumiValue(dictionary, @"target"));
+    if (target) {
+        NSString *title = LumiAsString(result[@"title"]) ?: LumiAsString(target[@"name"]);
+        if (title.length) {
+            result[@"title"] = title;
+        }
+        NSString *avatar = LumiAsString(result[@"avatar_url"]) ?: LumiAsString(target[@"avatar_url"]);
+        if (avatar.length) {
+            result[@"avatar_url"] = avatar;
         }
     }
     return result;
@@ -338,11 +437,12 @@
         weakSelf.loading = NO;
         if (error) {
             weakSelf.stateLabel.text = error.localizedDescription;
+            [LumiDiagnostics log:@"чат %@: история не загрузилась — %@", weakSelf.chatID, error.localizedDescription];
             return;
         }
-        NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : @{};
-        NSArray *rawMessages = dictionary[@"messages"];
-        weakSelf.hasMore = [dictionary[@"has_more"] boolValue];
+        NSDictionary *dictionary = LumiAsDictionary(result) ?: @{};
+        NSArray *rawMessages = LumiAsArray(dictionary[@"messages"]);
+        weakSelf.hasMore = [LumiAsNumber(dictionary[@"has_more"]) boolValue];
         [weakSelf applyChatMetadataFromPayload:dictionary];
         [weakSelf applyMessages:rawMessages];
         if (!weakSelf.messages.count) {
@@ -355,31 +455,35 @@
 }
 
 - (void)applyChatMetadataFromPayload:(NSDictionary *)payload {
-    NSDictionary *chat = payload[@"chat"];
-    if (![chat isKindOfClass:[NSDictionary class]]) {
+    NSDictionary *chat = LumiAsDictionary(LumiValue(payload, @"chat"));
+    if (!chat) {
+        chat = LumiAsDictionary(LumiValue(payload, @"session"));
+    }
+    if (!chat) {
         return;
     }
-    NSString *title = chat[@"title"];
-    if (![title isKindOfClass:[NSString class]] || !title.length) {
-        title = chat[@"target"][@"name"];
+    NSString *title = LumiAsString(chat[@"title"]);
+    if (!title.length) {
+        title = LumiNestedString(chat, @"target", @"name");
     }
-    if ([title isKindOfClass:[NSString class]] && title.length) {
+    if (title.length) {
         self.chatTitle = title;
-        self.title = title;
+        [self refreshNavigationTitle];
     }
-    NSString *avatar = chat[@"avatar_url"] ?: chat[@"target"][@"avatar_url"];
-    if ([avatar isKindOfClass:[NSString class]] && avatar.length) {
+    NSString *avatar = LumiAsString(chat[@"avatar_url"]) ?: LumiNestedString(chat, @"target", @"avatar_url");
+    if (avatar.length) {
         self.avatarURL = avatar;
     }
 }
 
 - (void)applyMessages:(NSArray *)rawMessages {
     [self.messages removeAllObjects];
-    if (![rawMessages isKindOfClass:[NSArray class]]) {
+    NSArray *messages = LumiAsArray(rawMessages);
+    if (!messages) {
         return;
     }
-    for (NSDictionary *message in rawMessages) {
-        NSMutableDictionary *normalized = [self normalizedMessage:message];
+    for (id message in messages) {
+        NSMutableDictionary *normalized = [self normalizedMessage:LumiAsDictionary(message)];
         if (normalized) {
             [self.messages addObject:normalized];
         }
@@ -413,47 +517,49 @@
     if (![message isKindOfClass:[NSDictionary class]]) {
         return nil;
     }
-    NSString *content = message[@"content"];
-    if (![content isKindOfClass:[NSString class]]) {
-        content = [message[@"text"] isKindOfClass:[NSString class]] ? message[@"text"] : nil;
-    }
-    if (![content isKindOfClass:[NSString class]]) {
-        content = [message[@"message"] isKindOfClass:[NSString class]] ? message[@"message"] : nil;
-    }
-    if (![content isKindOfClass:[NSString class]]) {
-        content = @"";
-    }
+    NSString *content = LumiStringValue(LumiValue(message, @"content"))
+        ?: LumiStringValue(LumiValue(message, @"text"))
+        ?: LumiStringValue(LumiValue(message, @"message"))
+        ?: @"";
     BOOL isUser = NO;
-    NSString *role = message[@"role"] ?: message[@"sender"] ?: message[@"author"] ?: message[@"type"] ?: message[@"sender_type"];
-    if ([role isKindOfClass:[NSString class]]) {
+    NSString *role = LumiStringValue(LumiValue(message, @"role"))
+        ?: LumiStringValue(LumiValue(message, @"sender"))
+        ?: LumiStringValue(LumiValue(message, @"author"))
+        ?: LumiStringValue(LumiValue(message, @"sender_type"));
+    if (role.length) {
         isUser = [role isEqualToString:@"user"] || [role isEqualToString:@"human"];
     }
-    if (message[@"is_user"]) {
-        isUser = [message[@"is_user"] boolValue];
+    NSNumber *isUserFlag = LumiAsNumber(LumiValue(message, @"is_user"));
+    if (isUserFlag) {
+        isUser = isUserFlag.boolValue;
     }
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
     result[@"content"] = content;
     result[@"is_user"] = @(isUser);
-    if (message[@"id"]) {
-        result[@"id"] = message[@"id"];
+    NSString *identifier = LumiStringValue(LumiValue(message, @"id"));
+    if (identifier.length) {
+        result[@"id"] = identifier;
     }
-    if (message[@"created_at"]) {
-        result[@"created_at"] = message[@"created_at"];
+    NSString *createdAt = LumiStringValue(LumiValue(message, @"created_at"))
+        ?: LumiStringValue(LumiValue(message, @"createdAt"))
+        ?: LumiStringValue(LumiValue(message, @"timestamp"));
+    if (createdAt.length) {
+        result[@"created_at"] = createdAt;
     }
-    NSArray *photos = [LumiRichTextRenderer imageURLsInText:content];
+    NSArray<NSString *> *photos = LumiPhotoURLsInMessage(message, content);
     if (photos.count) {
-        result[@"photo_url"] = photos.firstObject;
+        result[@"photo_urls"] = photos;
     }
     return result;
 }
 
 - (void)sortAndReload {
-    [self.messages sortUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
-        NSString *leftDate = left[@"created_at"] ?: @"";
-        NSString *rightDate = right[@"created_at"] ?: @"";
-        return [leftDate compare:rightDate];
+    [self.messages sortUsingComparator:^NSComparisonResult(id leftObject, id rightObject) {
+        NSDictionary *left = LumiAsDictionary(leftObject);
+        NSDictionary *right = LumiAsDictionary(rightObject);
+        return LumiCompareDates(LumiValue(left, @"created_at"), LumiValue(right, @"created_at"));
     }];
-    [self.tableView reloadData];
+    [self safeReloadTable];
     self.stateLabel.text = self.messages.count ? nil : @"Напишите первое сообщение";
     [self scrollToBottomAnimated:NO];
     if (self.messages.count) {
@@ -462,11 +568,34 @@
 }
 
 - (void)scrollToBottomAnimated:(BOOL)animated {
-    if (!self.messages.count) {
+    if (!self.messages.count || self.tableView.numberOfSections == 0) {
         return;
     }
-    NSIndexPath *last = [NSIndexPath indexPathForRow:self.messages.count - 1 inSection:0];
-    [self.tableView scrollToRowAtIndexPath:last atScrollPosition:UITableViewScrollPositionBottom animated:animated];
+    NSInteger rows = [self.tableView numberOfRowsInSection:0];
+    if (rows <= 0) {
+        return;
+    }
+    NSInteger row = MIN((NSInteger)self.messages.count, rows) - 1;
+    if (row < 0) {
+        return;
+    }
+    @try {
+        [self.tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:row inSection:0]
+                              atScrollPosition:UITableViewScrollPositionBottom
+                                      animated:animated];
+    } @catch (NSException *exception) {
+        NSLog(@"[Lumi] scroll failed: %@", exception.reason);
+    }
+}
+
+/// All table mutations funnel through here so a stale row index can never
+/// terminate the app with NSInternalInconsistencyException.
+- (void)safeReloadTable {
+    @try {
+        [self.tableView reloadData];
+    } @catch (NSException *exception) {
+        NSLog(@"[Lumi] reloadData failed: %@", exception.reason);
+    }
 }
 
 #pragma mark - Sending
@@ -481,7 +610,7 @@
 }
 
 - (void)sendCurrentText {
-    NSString *text = [self.inputField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *text = [(self.inputField.text ?: @"") stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!text.length || self.sending) {
         return;
     }
@@ -516,7 +645,7 @@
 
 - (void)handleStreamEvent:(NSString *)type payload:(NSDictionary *)payload {
     if ([type isEqualToString:@"user_message"] || [type isEqualToString:@"user_message_updated"]) {
-        NSDictionary *message = payload[@"message"] ?: payload;
+        NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (normalized) {
             normalized[@"is_user"] = @YES;
@@ -532,21 +661,22 @@
         return;
     }
     if ([type isEqualToString:@"delta"]) {
-        NSString *content = payload[@"content"];
-        if ([content isKindOfClass:[NSString class]]) {
+        NSString *content = LumiStringValue(LumiValue(payload, @"content"));
+        if (content.length) {
             NSMutableDictionary *assistant = [self pendingAssistantMessage];
             if (assistant) {
-                NSString *existing = assistant[@"content"] ?: @"";
-                assistant[@"content"] = [existing stringByAppendingString:content];
-                NSArray *photos = [LumiRichTextRenderer imageURLsInText:assistant[@"content"]];
-                assistant[@"photo_url"] = photos.count ? photos.firstObject : nil;
+                NSString *existing = LumiAsString(assistant[@"content"]) ?: @"";
+                NSString *combined = [existing stringByAppendingString:content];
+                assistant[@"content"] = combined;
+                NSArray *photos = LumiPhotoURLsInMessage(@{}, combined);
+                assistant[@"photo_urls"] = photos.count ? photos : nil;
                 [self reloadLastRows];
             }
         }
         return;
     }
     if ([type isEqualToString:@"intro_message"]) {
-        NSDictionary *message = payload[@"message"] ?: payload;
+        NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (normalized) {
             [self.messages addObject:normalized];
@@ -556,16 +686,18 @@
         return;
     }
     if ([type isEqualToString:@"done"] || [type isEqualToString:@"variant_done"]) {
-        NSDictionary *message = payload[@"message"] ?: payload;
+        NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (!normalized) {
             return;
         }
         NSMutableDictionary *assistant = [self pendingAssistantMessage];
         if (assistant) {
-            if (![normalized[@"content"] length] && [assistant[@"content"] length]) {
+            if (![LumiAsString(normalized[@"content"]) length] && [LumiAsString(assistant[@"content"]) length]) {
                 normalized[@"content"] = assistant[@"content"];
-                normalized[@"photo_url"] = assistant[@"photo_url"];
+            }
+            if (!LumiAsArray(normalized[@"photo_urls"]).count && LumiAsArray(assistant[@"photo_urls"]).count) {
+                normalized[@"photo_urls"] = assistant[@"photo_urls"];
             }
             NSUInteger index = [self.messages indexOfObjectIdenticalTo:assistant];
             if (index != NSNotFound) {
@@ -581,7 +713,7 @@
         return;
     }
     if ([type isEqualToString:@"error"]) {
-        NSString *message = payload[@"error"];
+        NSString *message = LumiStringValue(LumiValue(payload, @"error")) ?: LumiStringValue(LumiValue(payload, @"message"));
         [self finishStreamingWithError:[NSError errorWithDomain:LumiAPIErrorDomain
                                                           code:500
                                                       userInfo:@{NSLocalizedDescriptionKey: message ?: @"Ошибка генерации"}]];
@@ -615,14 +747,22 @@
 /// Row-count-safe reload used while streaming: any mismatch is resolved by a
 /// full reload inside an update transaction.
 - (void)reloadAllRows {
-    NSInteger expected = self.tableView.numberOfSections > 0
-        ? [self.tableView numberOfRowsInSection:0] : 0;
-    if (expected != (NSInteger)self.messages.count) {
-        [self.tableView reloadData];
+    if (self.tableView.numberOfSections == 0) {
+        [self safeReloadTable];
         return;
     }
-    [self.tableView beginUpdates];
-    [self.tableView endUpdates];
+    NSInteger expected = [self.tableView numberOfRowsInSection:0];
+    if (expected != (NSInteger)self.messages.count) {
+        [self safeReloadTable];
+        return;
+    }
+    @try {
+        [self.tableView beginUpdates];
+        [self.tableView endUpdates];
+    } @catch (NSException *exception) {
+        NSLog(@"[Lumi] batch update failed: %@", exception.reason);
+        [self safeReloadTable];
+    }
 }
 
 /// Reloading rows that disappeared (e.g. the server replaced a placeholder)
@@ -631,20 +771,27 @@
     if (!indexPaths.count) {
         return;
     }
-    NSInteger rows = self.messages.count;
+    if (self.tableView.numberOfSections == 0) {
+        [self safeReloadTable];
+        return;
+    }
+    NSInteger rows = [self.tableView numberOfRowsInSection:0];
+    NSInteger expected = (NSInteger)self.messages.count;
     for (NSIndexPath *path in indexPaths) {
-        if (path.row >= rows || path.row < 0) {
-            [self.tableView reloadData];
+        if (path.row >= rows || path.row < 0 || path.row >= expected) {
+            [self safeReloadTable];
             return;
         }
     }
-    NSMutableArray *paths = [NSMutableArray array];
-    for (NSIndexPath *path in indexPaths) {
-        [paths addObject:path];
+    @try {
+        [self.tableView beginUpdates];
+        [self.tableView reloadRowsAtIndexPaths:indexPaths.allObjects
+                              withRowAnimation:UITableViewRowAnimationNone];
+        [self.tableView endUpdates];
+    } @catch (NSException *exception) {
+        NSLog(@"[Lumi] reloadRows failed: %@", exception.reason);
+        [self safeReloadTable];
     }
-    [self.tableView beginUpdates];
-    [self.tableView reloadRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationNone];
-    [self.tableView endUpdates];
 }
 
 - (void)finishStreamingWithError:(NSError *)error {
@@ -701,10 +848,10 @@
     NSDictionary *message = self.messages[indexPath.row];
     BOOL isUser = [message[@"is_user"] boolValue];
     BOOL pending = [message[@"pending"] boolValue];
-    [cell configureWithText:message[@"content"]
+    [cell configureWithText:LumiStringValue(message[@"content"])
                      isUser:isUser
                     pending:pending
-                   photoURL:message[@"photo_url"]];
+                  photoURLs:LumiAsArray(message[@"photo_urls"]) ?: @[]];
     return cell;
 }
 

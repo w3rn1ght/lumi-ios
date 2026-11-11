@@ -1,11 +1,15 @@
 #import "LumiImageLoader.h"
 #import "LumiWebP.h"
+#import "LumiSafe.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <objc/runtime.h>
 
 static const void *kLumiImageLoaderURLKey = &kLumiImageLoaderURLKey;
-static const NSUInteger kLumiImageCacheLimit = 320;
+static const NSUInteger kLumiImageCacheLimit = 140;
 static const NSUInteger kLumiImageDiskLimit = 700;
+static const CGFloat kLumiImageMaxDimension = 640.0;
+static const CGFloat kLumiAnimatedFrameMaxDimension = 360.0;
+static const NSUInteger kLumiAnimatedFrameLimit = 40;
 
 @interface LumiImageLoader ()
 @property (nonatomic, strong) NSURLSession *session;
@@ -35,6 +39,9 @@ static const NSUInteger kLumiImageDiskLimit = 700;
         _session = [NSURLSession sessionWithConfiguration:configuration];
         _memoryCache = [[NSCache alloc] init];
         _memoryCache.countLimit = kLumiImageCacheLimit;
+        // A hard byte budget: 700 px portraits used to eat hundreds of
+        // megabytes and the system killed the app (looks like a crash).
+        _memoryCache.totalCostLimit = 96 * 1024 * 1024;
         _workQueue = dispatch_queue_create("com.w3rn1ght.lumi.images", DISPATCH_QUEUE_CONCURRENT);
 
         NSString *caches = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject];
@@ -50,7 +57,7 @@ static const NSUInteger kLumiImageDiskLimit = 700;
 #pragma mark - Public
 
 - (UIImage *)cachedImageForURLString:(NSString *)urlString {
-    if (!urlString.length) {
+    if (!LumiAsString(urlString).length) {
         return nil;
     }
     return [self.memoryCache objectForKey:urlString];
@@ -62,7 +69,8 @@ static const NSUInteger kLumiImageDiskLimit = 700;
 }
 
 - (void)loadURLString:(NSString *)urlString intoImageView:(UIImageView *)imageView placeholder:(BOOL)usePlaceholder {
-    if (!urlString.length) {
+    urlString = LumiAsString(urlString);
+    if (!urlString.length || !imageView) {
         return;
     }
     objc_setAssociatedObject(imageView, kLumiImageLoaderURLKey, [urlString copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -94,6 +102,10 @@ static const NSUInteger kLumiImageDiskLimit = 700;
 }
 
 - (void)loadURLString:(NSString *)urlString completion:(void (^)(UIImage *))completion {
+    if (!completion) {
+        return;
+    }
+    urlString = LumiAsString(urlString);
     if (!urlString.length) {
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(nil);
@@ -152,11 +164,12 @@ static const NSUInteger kLumiImageDiskLimit = 700;
         if (!image) {
             image = [UIImage imageWithData:data];
         }
-        if (image && image.size.width > 700.0 && image.images.count == 0) {
-            image = [self downscaledImage:image maxDimension:700.0];
+        if (image && image.size.width > kLumiImageMaxDimension && image.images.count == 0) {
+            image = [self downscaledImage:image maxDimension:kLumiImageMaxDimension];
         }
         if (image) {
-            [self.memoryCache setObject:image forKey:urlString];
+            NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * 4.0);
+            [self.memoryCache setObject:image forKey:urlString cost:cost];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(image);
@@ -189,14 +202,24 @@ static const NSUInteger kLumiImageDiskLimit = 700;
     size_t count = CGImageSourceGetCount(source);
     UIImage *result = nil;
     if (count > 1) {
-        NSMutableArray *frames = [NSMutableArray arrayWithCapacity:count];
+        size_t frameLimit = MIN(count, kLumiAnimatedFrameLimit);
+        NSMutableArray *frames = [NSMutableArray arrayWithCapacity:frameLimit];
         double totalDuration = 0.0;
-        for (size_t index = 0; index < count; index++) {
-            CGImageRef frameRef = CGImageSourceCreateImageAtIndex(source, index, NULL);
+        NSDictionary *thumbnailOptions = @{
+            (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+            (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+            (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @(kLumiAnimatedFrameMaxDimension),
+        };
+        for (size_t index = 0; index < frameLimit; index++) {
+            CGImageRef frameRef = CGImageSourceCreateThumbnailAtIndex(source, index,
+                                                                      (__bridge CFDictionaryRef)thumbnailOptions);
+            if (!frameRef) {
+                frameRef = CGImageSourceCreateImageAtIndex(source, index, NULL);
+            }
             if (!frameRef) {
                 continue;
             }
-            [frames addObject:(__bridge id)frameRef];
+            [frames addObject:[UIImage imageWithCGImage:frameRef]];
             CGImageRelease(frameRef);
             totalDuration += [self frameDurationAtIndex:(NSUInteger)index source:source];
         }

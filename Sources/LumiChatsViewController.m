@@ -4,7 +4,43 @@
 #import "LumiChatViewController.h"
 #import "LumiImageLoader.h"
 #import "LumiLoginViewController.h"
+#import "LumiRichText.h"
+#import "LumiSafe.h"
+#import "LumiDiagnostics.h"
 #import "LumiTheme.h"
+
+
+static NSString *LumiChatIdentifier(NSDictionary *chat) {
+    for (NSString *key in @[@"id", @"chat_id", @"session_id"]) {
+        NSString *value = LumiAsString(chat[key]);
+        if (value.length) {
+            return value;
+        }
+    }
+    return nil;
+}
+
+static NSString *LumiChatKind(NSDictionary *chat) {
+    for (NSString *key in @[@"target_kind", @"kind", @"target_type", @"type"]) {
+        NSString *value = LumiAsString(chat[key]);
+        if (value.length) {
+            return value;
+        }
+    }
+    NSString *nested = LumiNestedString(chat, @"target", @"kind");
+    return nested.length ? nested : LumiNestedString(chat, @"target", @"type");
+}
+
+static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
+    for (NSString *key in @[@"target_id", @"character_id", @"story_id", @"targetId"]) {
+        NSString *value = LumiAsString(chat[key]);
+        if (value.length) {
+            return value;
+        }
+    }
+    NSString *nested = LumiNestedString(chat, @"target", @"id");
+    return nested.length ? nested : LumiNestedString(chat, @"target", @"character_id");
+}
 
 @interface LumiSessionCell : UITableViewCell
 @property (nonatomic, strong) UIImageView *thumb;
@@ -75,15 +111,19 @@
 }
 
 - (void)configureWithChat:(NSDictionary *)chat item:(nullable NSDictionary *)item number:(NSUInteger)number {
-    NSString *name = item[@"name"] ?: item[@"title"];
-    if (![name isKindOfClass:[NSString class]] || !name.length) {
-        name = chat[@"target"][@"name"];
+    chat = LumiAsDictionary(chat) ?: @{};
+    item = LumiAsDictionary(item);
+    NSString *name = LumiAsString(item[@"name"]) ?: LumiAsString(item[@"title"]);
+    if (!name.length) {
+        name = LumiAsString(chat[@"title"]);
     }
-    if (![name isKindOfClass:[NSString class]] || !name.length) {
-        name = @"Персонаж";
+    if (!name.length) {
+        name = LumiNestedString(chat, @"target", @"name");
     }
-    NSString *nameAndNumber = [NSString stringWithFormat:@"%@  ·  чат №%lu", name, (unsigned long)number];
-    self.titleLabel.text = nameAndNumber;
+    if (!name.length) {
+        name = LumiChatKind(chat) && [LumiChatKind(chat) isEqualToString:@"story"] ? @"История" : @"Персонаж";
+    }
+    self.titleLabel.text = [NSString stringWithFormat:@"%@  ·  чат №%lu", name, (unsigned long)number];
 
     NSString *preview = [self previewFromChat:chat];
     self.subtitleLabel.text = preview.length ? preview : @"Нет сообщений";
@@ -91,41 +131,68 @@
     NSDate *date = [self dateFromChat:chat];
     self.dateLabel.text = date ? [self relativeStringFromDate:date] : @"";
 
-    NSString *avatar = chat[@"avatar_url"];
-    if (![avatar isKindOfClass:[NSString class]] || !avatar.length) {
-        avatar = item[@"avatar_url"] ?: chat[@"target"][@"avatar_url"];
+    NSString *avatar = LumiAsString(chat[@"avatar_url"]);
+    if (!avatar.length) {
+        avatar = LumiAsString(item[@"avatar_url"]);
+    }
+    if (!avatar.length) {
+        avatar = LumiNestedString(chat, @"target", @"avatar_url");
     }
     [self.thumb setImage:nil];
-    [[LumiImageLoader sharedLoader] loadURLString:avatar intoImageView:self.thumb];
+    if (avatar.length) {
+        [[LumiImageLoader sharedLoader] loadURLString:avatar intoImageView:self.thumb];
+    } else {
+        self.thumb.image = [UIImage imageNamed:@"AvatarPlaceholder"];
+    }
 }
 
 - (NSString *)previewFromChat:(NSDictionary *)chat {
-    id last = chat[@"last_message"];
+    id last = LumiValue(chat, @"last_message");
+    NSString *content = nil;
     if ([last isKindOfClass:[NSDictionary class]]) {
-        id content = last[@"content"] ?: last[@"text"] ?: last[@"message"];
-        if ([content isKindOfClass:[NSString class]]) {
-            return content;
+        content = LumiStringValue(LumiValue(last, @"content"))
+            ?: LumiStringValue(LumiValue(last, @"text"))
+            ?: LumiStringValue(LumiValue(last, @"message"));
+    } else {
+        content = LumiStringValue(last);
+    }
+    if (!content.length) {
+        for (NSString *key in @[@"last_message_preview", @"preview", @"note", @"last_message_text"]) {
+            content = LumiStringValue(LumiValue(chat, key));
+            if (content.length) {
+                break;
+            }
         }
     }
-    if ([last isKindOfClass:[NSString class]]) {
-        return last;
+    if (!content.length) {
+        return nil;
     }
-    for (NSString *key in @[@"last_message_preview", @"preview", @"note", @"last_message_text"]) {
-        id value = chat[key];
-        if ([value isKindOfClass:[NSString class]] && [value length]) {
-            return value;
-        }
+    BOOL hadPhoto = [LumiRichTextRenderer imageURLsInText:content].count > 0;
+    NSString *stripped = [LumiRichTextRenderer stringByStrippingImageMarkers:content];
+    stripped = [[stripped componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]
+                componentsJoinedByString:@" "];
+    stripped = [stripped stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (!stripped.length && hadPhoto) {
+        return @"Фотография";
     }
-    return nil;
+    return stripped.length ? stripped : nil;
 }
 
 - (NSDate *)dateFromChat:(NSDictionary *)chat {
+    NSString *candidates[5];
+    NSUInteger count = 0;
     for (NSString *key in @[@"last_message_at", @"updated_at", @"last_activity_at", @"created_at"]) {
-        id value = chat[key];
-        if (![value isKindOfClass:[NSString class]]) {
-            continue;
+        NSString *value = LumiAsString(LumiValue(chat, key));
+        if (value.length) {
+            candidates[count++] = value;
         }
-        NSDate *date = [self parseDate:value];
+    }
+    NSString *nested = LumiNestedString(chat, @"last_message", @"created_at");
+    if (nested.length) {
+        candidates[count++] = nested;
+    }
+    for (NSUInteger index = 0; index < count; index++) {
+        NSDate *date = [self parseDate:candidates[index]];
         if (date) {
             return date;
         }
@@ -385,9 +452,11 @@
         [weakSelf.tableView.refreshControl endRefreshing];
         if (error) {
             weakSelf.stateLabel.text = error.localizedDescription;
+            [LumiDiagnostics log:@"чаты: ошибка списка — %@", error.localizedDescription];
             return;
         }
-        NSArray *items = [result isKindOfClass:[NSArray class]] ? result : @[];
+        NSArray *items = LumiAsArray(result) ?: @[];
+        [LumiDiagnostics log:@"чаты: получено %lu", (unsigned long)items.count];
         weakSelf.chats = [weakSelf sortedChats:items];
         weakSelf.stateLabel.text = weakSelf.chats.count ? nil : @"Чатов пока нет. Откройте каталог и начните общение.";
         [weakSelf.tableView reloadData];
@@ -401,22 +470,31 @@
             [valid addObject:chat];
         }
     }
-    return [valid sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
-        NSString *leftDate = left[@"last_message_at"] ?: left[@"updated_at"] ?: left[@"created_at"] ?: @"";
-        NSString *rightDate = right[@"last_message_at"] ?: right[@"updated_at"] ?: right[@"created_at"] ?: @"";
-        return [rightDate compare:leftDate];
+    return [valid sortedArrayUsingComparator:^NSComparisonResult(id leftObject, id rightObject) {
+        NSDictionary *left = LumiAsDictionary(leftObject);
+        NSDictionary *right = LumiAsDictionary(rightObject);
+        id leftDate = nil;
+        id rightDate = nil;
+        for (NSString *key in @[@"last_message_at", @"updated_at", @"created_at"]) {
+            leftDate = LumiValue(left, key) ?: leftDate;
+            rightDate = LumiValue(right, key) ?: rightDate;
+        }
+        return LumiCompareDates(rightDate, leftDate);
     }];
 }
 
 - (NSDictionary *)catalogItemForChat:(NSDictionary *)chat {
-    id targetID = chat[@"target_id"] ?: chat[@"character_id"] ?: chat[@"story_id"] ?: chat[@"target"][@"id"];
-    if (![targetID isKindOfClass:[NSString class]]) {
+    NSString *targetID = LumiChatTargetIdentifier(LumiAsDictionary(chat) ?: @{});
+    if (!targetID.length) {
         return nil;
     }
-    NSString *kind = chat[@"target_kind"] ?: chat[@"kind"] ?: chat[@"target_type"] ?: chat[@"target"][@"kind"];
+    NSString *kind = LumiChatKind(chat);
     LumiCatalogStore *store = [LumiCatalogStore sharedStore];
-    if ([kind isKindOfClass:[NSString class]] && [kind isEqualToString:@"story"]) {
+    if ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"]) {
         return [store storyWithID:targetID];
+    }
+    if ([kind isEqualToString:@"character"] || [kind isEqualToString:@"characters"]) {
+        return [store characterWithID:targetID];
     }
     NSDictionary *character = [store characterWithID:targetID];
     return character ?: [store storyWithID:targetID];
@@ -436,14 +514,29 @@
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    NSDictionary *chat = self.chats[indexPath.row];
-    NSDictionary *item = [self catalogItemForChat:chat] ?: @{};
-    LumiDetailKind kind = LumiDetailKindCharacter;
-    id kindValue = chat[@"target_kind"] ?: chat[@"kind"] ?: chat[@"target_type"] ?: chat[@"target"][@"kind"];
-    if ([kindValue isKindOfClass:[NSString class]] && [kindValue isEqualToString:@"story"]) {
-        kind = LumiDetailKindStory;
+    if (indexPath.row >= (NSInteger)self.chats.count) {
+        return;
     }
+    NSDictionary *chat = LumiAsDictionary(self.chats[indexPath.row]);
+    if (!chat) {
+        return;
+    }
+    NSString *identifier = LumiChatIdentifier(chat);
+    if (!identifier.length) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось открыть чат"
+                                                                       message:@"Сервер не вернул идентификатор чата. Потяните список вниз, чтобы обновить его."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    NSDictionary *item = [self catalogItemForChat:chat] ?: @{};
+    NSString *kindValue = LumiChatKind(chat);
+    LumiDetailKind kind = ([kindValue isEqualToString:@"story"] || [kindValue isEqualToString:@"stories"])
+        ? LumiDetailKindStory : LumiDetailKindCharacter;
     LumiChatViewController *controller = [[LumiChatViewController alloc] initWithChat:chat item:item kind:kind];
+    controller.chatNumber = (NSUInteger)(indexPath.row + 1);
     [self.navigationController pushViewController:controller animated:YES];
 }
 
@@ -453,8 +546,12 @@
     UIContextualAction *delete = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
                                                                          title:@"Удалить"
                                                                        handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+        if (indexPath.row >= (NSInteger)weakSelf.chats.count) {
+            completionHandler(NO);
+            return;
+        }
         NSDictionary *chat = weakSelf.chats[indexPath.row];
-        NSString *identifier = chat[@"id"];
+        NSString *identifier = LumiChatIdentifier(chat);
         if (![identifier isKindOfClass:[NSString class]]) {
             completionHandler(NO);
             return;
@@ -462,10 +559,16 @@
         [[LumiAPI sharedClient] deleteChat:identifier completion:^(id result, NSError *error) {
             if (!error) {
                 NSMutableArray *chats = [weakSelf.chats mutableCopy];
-                [chats removeObjectAtIndex:indexPath.row];
-                weakSelf.chats = chats;
-                [weakSelf.tableView deleteRowsAtIndexPaths:@[indexPath]
-                                          withRowAnimation:UITableViewRowAnimationAutomatic];
+                if (indexPath.row < (NSInteger)chats.count) {
+                    [chats removeObjectAtIndex:indexPath.row];
+                    weakSelf.chats = chats;
+                    @try {
+                        [weakSelf.tableView deleteRowsAtIndexPaths:@[indexPath]
+                                                  withRowAnimation:UITableViewRowAnimationAutomatic];
+                    } @catch (NSException *exception) {
+                        [weakSelf.tableView reloadData];
+                    }
+                }
             }
             completionHandler(error == nil);
         }];

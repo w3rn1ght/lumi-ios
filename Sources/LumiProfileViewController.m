@@ -1,5 +1,6 @@
 #import "LumiProfileViewController.h"
 #import "LumiAPI.h"
+#import "LumiDiagnostics.h"
 #import "LumiCatalogStore.h"
 #import "LumiImageLoader.h"
 #import "LumiLoginViewController.h"
@@ -77,9 +78,13 @@
     [aboutButton addTarget:self action:@selector(aboutTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:aboutButton];
 
+    UIButton *journalButton = [self buttonWithTitle:@"Журнал ошибок" filled:NO];
+    [journalButton addTarget:self action:@selector(journalTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:journalButton];
+
     UILabel *version = [[UILabel alloc] init];
     version.translatesAutoresizingMaskIntoConstraints = NO;
-    version.text = @"Lumi 1.4.0 · нативный клиент";
+    version.text = @"Lumi 1.4.1 · нативный клиент";
     version.textColor = LumiMutedColor();
     version.font = LumiFont(12.0, UIFontWeightRegular);
     version.textAlignment = NSTextAlignmentCenter;
@@ -126,6 +131,11 @@
         [aboutButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [aboutButton.widthAnchor constraintEqualToConstant:240.0],
         [aboutButton.heightAnchor constraintEqualToConstant:46.0],
+
+        [journalButton.topAnchor constraintEqualToAnchor:aboutButton.bottomAnchor constant:8.0],
+        [journalButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [journalButton.widthAnchor constraintEqualToConstant:240.0],
+        [journalButton.heightAnchor constraintEqualToConstant:40.0],
 
         [version.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor constant:-16.0],
         [version.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:24.0],
@@ -254,6 +264,60 @@
         [store forceRefresh];
     }
     [self refreshCatalogLabel];
+}
+
+- (void)journalTapped {
+    UIViewController *controller = [[UIViewController alloc] init];
+    controller.view.backgroundColor = LumiBackgroundColor();
+    controller.title = @"Журнал ошибок";
+
+    UITextView *textView = [[UITextView alloc] initWithFrame:CGRectZero];
+    textView.translatesAutoresizingMaskIntoConstraints = NO;
+    textView.backgroundColor = LumiSurfaceColor();
+    textView.textColor = LumiTextColor();
+    textView.font = [UIFont fontWithName:@"Menlo" size:11.0] ?: [UIFont systemFontOfSize:11.0];
+    textView.editable = NO;
+    textView.alwaysBounceVertical = YES;
+    textView.text = [LumiDiagnostics logContents];
+    [controller.view addSubview:textView];
+
+    UILayoutGuide *guide = controller.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [textView.topAnchor constraintEqualToAnchor:guide.topAnchor constant:8.0],
+        [textView.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:10.0],
+        [textView.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-10.0],
+        [textView.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor constant:-8.0],
+    ]];
+
+    controller.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                      target:self
+                                                      action:@selector(dismissJournal)];
+    controller.navigationItem.leftBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:@"Копировать"
+                                         style:UIBarButtonItemStylePlain
+                                        target:self
+                                        action:@selector(copyJournal)];
+
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:controller];
+    navigation.navigationBar.barStyle = UIBarStyleBlack;
+    navigation.navigationBar.barTintColor = LumiBackgroundColor();
+    navigation.navigationBar.tintColor = LumiAccentColor();
+    navigation.navigationBar.titleTextAttributes = @{NSForegroundColorAttributeName: LumiTextColor()};
+    [self presentViewController:navigation animated:YES completion:nil];
+}
+
+- (void)dismissJournal {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)copyJournal {
+    [UIPasteboard generalPasteboard].string = [LumiDiagnostics logContents];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Скопировано"
+                                                                   message:@"Журнал в буфере обмена. Вставьте его в сообщение."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)aboutTapped {
