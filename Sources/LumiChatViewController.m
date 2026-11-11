@@ -1,5 +1,6 @@
 #import "LumiChatViewController.h"
 #import "LumiAPI.h"
+#import <math.h>
 #import "LumiCatalogStore.h"
 #import "LumiImageLoader.h"
 #import "LumiRichText.h"
@@ -9,8 +10,47 @@
 
 #pragma mark - Photo view
 
+static NSCache<NSString *, NSNumber *> *LumiPhotoRatioCache(void) {
+    static NSCache *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 400;
+    });
+    return cache;
+}
+
+static NSNumber *LumiCachedPhotoRatio(NSString *url) {
+    if (!url.length) {
+        return nil;
+    }
+    NSNumber *cached = [LumiPhotoRatioCache() objectForKey:url];
+    if (cached) {
+        return cached;
+    }
+    UIImage *image = [[LumiImageLoader sharedLoader] cachedImageForURLString:url];
+    if (image.size.width > 1.0 && image.size.height > 1.0) {
+        NSNumber *ratio = @(image.size.height / image.size.width);
+        [LumiPhotoRatioCache() setObject:ratio forKey:url];
+        return ratio;
+    }
+    return nil;
+}
+
+/// Height that keeps the original aspect ratio. A generous cap keeps a very
+/// tall image from filling the whole screen; `ScaleAspectFit` means the picture
+/// is never cropped or stretched, only letterboxed in the worst case.
+static CGFloat LumiPhotoHeightForRatio(CGFloat ratio, CGFloat width) {
+    if (!isfinite(ratio) || ratio <= 0.02) {
+        ratio = 0.75;
+    }
+    CGFloat height = width * ratio;
+    return MIN(MAX(height, 96.0), 420.0);
+}
+
 @interface LumiPhotoView : UIImageView
 @property (nonatomic, copy, nullable) NSString *photoURL;
+@property (nonatomic, copy, nullable) void (^imageSizeHandler)(CGSize size);
 @end
 
 @implementation LumiPhotoView
@@ -19,10 +59,11 @@
     self = [super initWithFrame:frame];
     if (self) {
         self.translatesAutoresizingMaskIntoConstraints = NO;
-        self.contentMode = UIViewContentModeScaleAspectFill;
+        // Fit, never fill: cropped portraits were the "обрезанные" complaint.
+        self.contentMode = UIViewContentModeScaleAspectFit;
         self.clipsToBounds = YES;
         self.layer.cornerRadius = 12.0;
-        self.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.18];
+        self.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.12];
         self.userInteractionEnabled = YES;
     }
     return self;
@@ -40,8 +81,12 @@
     __weak typeof(self) weakSelf = self;
     [[LumiImageLoader sharedLoader] loadURLString:photoURL completion:^(UIImage *image) {
         LumiPhotoView *strongSelf = weakSelf;
-        if (strongSelf && [strongSelf.photoURL isEqualToString:photoURL]) {
-            strongSelf.image = image;
+        if (!strongSelf || ![strongSelf.photoURL isEqualToString:photoURL]) {
+            return;
+        }
+        strongSelf.image = image;
+        if (image.size.width > 1.0 && image.size.height > 1.0 && strongSelf.imageSizeHandler) {
+            strongSelf.imageSizeHandler(image.size);
         }
     }];
 }
@@ -55,9 +100,11 @@
 @property (nonatomic, strong) UILabel *bubbleLabel;
 @property (nonatomic, strong) UIStackView *photoStack;
 @property (nonatomic, strong) NSArray<LumiPhotoView *> *photoViews;
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *photoHeightConstraints;
 @property (nonatomic, strong) NSLayoutConstraint *leadingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *trailingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *photoStackHeightConstraint;
+@property (nonatomic, weak) UITableView *hostTableView;
 @end
 
 static const CGFloat kLumiPhotoCellHeight = 168.0;
@@ -90,13 +137,17 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         [self.bubble addSubview:self.photoStack];
 
         NSMutableArray *views = [NSMutableArray array];
+        NSMutableArray *heights = [NSMutableArray array];
         for (NSUInteger index = 0; index < kLumiPhotosPerMessage; index++) {
             LumiPhotoView *photo = [[LumiPhotoView alloc] initWithFrame:CGRectZero];
-            [photo.heightAnchor constraintEqualToConstant:kLumiPhotoCellHeight].active = YES;
+            NSLayoutConstraint *height = [photo.heightAnchor constraintEqualToConstant:kLumiPhotoCellHeight];
+            height.active = YES;
+            [heights addObject:height];
             [self.photoStack addArrangedSubview:photo];
             [views addObject:photo];
         }
         self.photoViews = views;
+        self.photoHeightConstraints = heights;
 
         self.leadingConstraint = [self.bubble.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14.0];
         self.trailingConstraint = [self.bubble.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14.0];
@@ -124,11 +175,33 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
     [super prepareForReuse];
     self.bubbleLabel.attributedText = nil;
     self.bubbleLabel.text = nil;
-    for (LumiPhotoView *photo in self.photoViews) {
+    for (NSUInteger index = 0; index < self.photoViews.count; index++) {
+        LumiPhotoView *photo = self.photoViews[index];
+        photo.imageSizeHandler = nil;
         photo.photoURL = nil;
+        self.photoHeightConstraints[index].constant = kLumiPhotoCellHeight;
     }
     self.photoStack.hidden = YES;
     self.photoStackHeightConstraint.constant = 0.0;
+}
+
+- (void)updatePhotoStackHeight {
+    CGFloat total = 0.0;
+    NSUInteger visible = 0;
+    for (NSUInteger index = 0; index < self.photoViews.count; index++) {
+        if (self.photoViews[index].hidden) {
+            continue;
+        }
+        total += self.photoHeightConstraints[index].constant;
+        visible += 1;
+    }
+    if (visible == 0) {
+        self.photoStack.hidden = YES;
+        self.photoStackHeightConstraint.constant = 0.0;
+        return;
+    }
+    self.photoStack.hidden = NO;
+    self.photoStackHeightConstraint.constant = total + (visible - 1) * 6.0;
 }
 
 - (void)configureWithText:(NSString *)text
@@ -149,20 +222,68 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
     self.leadingConstraint.active = !isUser;
     self.trailingConstraint.active = isUser;
 
+    CGFloat contentWidth = CGRectGetWidth(self.contentView.bounds);
+    if (contentWidth < 120.0) {
+        contentWidth = CGRectGetWidth(self.hostTableView.bounds);
+    }
+    if (contentWidth < 120.0) {
+        contentWidth = CGRectGetWidth([UIScreen mainScreen].bounds);
+    }
+    CGFloat photoWidth = MAX(140.0, contentWidth * 0.82 - 16.0);
+
     NSUInteger count = MIN(photoURLs.count, kLumiPhotosPerMessage);
+    __weak typeof(self) weakSelf = self;
     for (NSUInteger index = 0; index < self.photoViews.count; index++) {
         LumiPhotoView *photo = self.photoViews[index];
         BOOL used = index < count;
         photo.hidden = !used;
-        photo.photoURL = used ? photoURLs[index] : nil;
+        if (!used) {
+            photo.imageSizeHandler = nil;
+            photo.photoURL = nil;
+            self.photoHeightConstraints[index].constant = kLumiPhotoCellHeight;
+            continue;
+        }
+
+        NSString *url = photoURLs[index];
+        NSNumber *knownRatio = LumiCachedPhotoRatio(url);
+        self.photoHeightConstraints[index].constant = knownRatio
+            ? LumiPhotoHeightForRatio(knownRatio.doubleValue, photoWidth)
+            : kLumiPhotoCellHeight;
+
+        photo.imageSizeHandler = ^(CGSize size) {
+            if (size.width < 1.0 || size.height < 1.0) {
+                return;
+            }
+            CGFloat ratio = size.height / size.width;
+            [LumiPhotoRatioCache() setObject:@(ratio) forKey:url];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LumiMessageCell *cell = weakSelf;
+                if (!cell || index >= cell.photoViews.count) {
+                    return;
+                }
+                LumiPhotoView *current = cell.photoViews[index];
+                if (![current.photoURL isEqualToString:url]) {
+                    return;
+                }
+                CGFloat newHeight = LumiPhotoHeightForRatio(ratio, photoWidth);
+                NSLayoutConstraint *constraint = cell.photoHeightConstraints[index];
+                if (fabs(constraint.constant - newHeight) < 1.0) {
+                    return;
+                }
+                constraint.constant = newHeight;
+                [cell updatePhotoStackHeight];
+                UITableView *table = cell.hostTableView;
+                if (table.window) {
+                    [UIView performWithoutAnimation:^{
+                        [table beginUpdates];
+                        [table endUpdates];
+                    }];
+                }
+            });
+        };
+        photo.photoURL = url;
     }
-    if (count > 0) {
-        self.photoStack.hidden = NO;
-        self.photoStackHeightConstraint.constant = count * kLumiPhotoCellHeight + (count - 1) * 6.0;
-    } else {
-        self.photoStack.hidden = YES;
-        self.photoStackHeightConstraint.constant = 0.0;
-    }
+    [self updatePhotoStackHeight];
 }
 
 @end
@@ -845,6 +966,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     LumiMessageCell *cell = [tableView dequeueReusableCellWithIdentifier:@"message" forIndexPath:indexPath];
+    cell.hostTableView = tableView;
     if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.messages.count) {
         [cell configureWithText:@"" isUser:NO pending:NO photoURLs:@[]];
         return cell;

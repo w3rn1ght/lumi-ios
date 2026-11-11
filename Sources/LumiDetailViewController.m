@@ -3,6 +3,7 @@
 #import "LumiChatViewController.h"
 #import "LumiImageLoader.h"
 #import "LumiLoginViewController.h"
+#import "LumiSafe.h"
 #import "LumiTheme.h"
 
 @interface LumiDetailViewController ()
@@ -11,6 +12,7 @@
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *stack;
 @property (nonatomic, strong) UIImageView *headerImageView;
+@property (nonatomic, strong) NSLayoutConstraint *headerHeightConstraint;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UILabel *tagsLabel;
@@ -51,13 +53,14 @@
 
     self.headerImageView = [[UIImageView alloc] init];
     self.headerImageView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.headerImageView.contentMode = UIViewContentModeScaleAspectFill;
+    self.headerImageView.contentMode = UIViewContentModeScaleAspectFit;
     self.headerImageView.clipsToBounds = YES;
     self.headerImageView.layer.cornerRadius = 18.0;
     self.headerImageView.backgroundColor = LumiSurfaceColor();
     self.headerImageView.image = [UIImage imageNamed:@"AvatarPlaceholder"];
     [self.stack addArrangedSubview:self.headerImageView];
-    [self.headerImageView.heightAnchor constraintEqualToConstant:280.0].active = YES;
+    self.headerHeightConstraint = [self.headerImageView.heightAnchor constraintEqualToConstant:280.0];
+    self.headerHeightConstraint.active = YES;
 
     self.titleLabel = [[UILabel alloc] init];
     self.titleLabel.font = LumiFont(24.0, UIFontWeightBold);
@@ -155,8 +158,8 @@
             self.bodyLabel.text = description;
         }
     } else {
-        NSString *tagline = self.item[@"tagline"];
-        NSString *owner = self.item[@"owner"][@"username"];
+        NSString *tagline = LumiAsString(LumiValue(self.item, @"tagline"));
+        NSString *owner = LumiNestedString(self.item, @"owner", @"username");
         NSMutableArray *pieces = [NSMutableArray array];
         if (tagline.length) {
             [pieces addObject:tagline];
@@ -180,8 +183,40 @@
         self.tagsLabel.text = nil;
     }
 
-    [[LumiImageLoader sharedLoader] loadURLString:self.item[@"avatar_url"] intoImageView:self.headerImageView];
+    [self loadHeaderImage];
     [self renderCast];
+}
+
+/// Keeps the original aspect ratio instead of cropping the portrait into a
+/// fixed 280 pt band (`ScaleAspectFill` was cutting heads off).
+- (void)loadHeaderImage {
+    NSString *url = LumiAsString(LumiValue(self.item, @"avatar_url"));
+    if (!url.length) {
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    [[LumiImageLoader sharedLoader] loadURLString:url completion:^(UIImage *image) {
+        if (!image) {
+            return;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LumiDetailViewController *strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            strongSelf.headerImageView.image = image;
+            if (image.size.width < 1.0 || image.size.height < 1.0) {
+                return;
+            }
+            CGFloat width = CGRectGetWidth(strongSelf.view.bounds) - 32.0;
+            if (width < 200.0) {
+                width = 320.0;
+            }
+            CGFloat ratio = image.size.height / image.size.width;
+            CGFloat height = MIN(MAX(width * ratio, 180.0), 460.0);
+            strongSelf.headerHeightConstraint.constant = height;
+        });
+    }];
 }
 
 - (void)renderCast {

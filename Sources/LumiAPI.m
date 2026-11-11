@@ -196,7 +196,7 @@ static NSString *LumiEncodePath(NSString *path) {
         configuration.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
         configuration.HTTPShouldSetCookies = YES;
         configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        configuration.HTTPMaximumConnectionsPerHost = 8;
+        configuration.HTTPMaximumConnectionsPerHost = 6;
         configuration.HTTPAdditionalHeaders = @{
             @"Accept": @"application/json",
             @"Accept-Language": @"ru,en;q=0.8",
@@ -566,14 +566,26 @@ static NSString *LumiEncodePath(NSString *path) {
                         identifier:(NSString *)identifier
                            attempt:(NSUInteger)attempt
                         completion:(LumiAPICompletion)completion {
+    if (!completion) {
+        return;
+    }
     NSString *path = [NSString stringWithFormat:@"/public/%@/%@", kind, identifier];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                      path:path
                                                   baseURL:kAPIBaseURL
                                                      body:nil
-                                                  timeout:15.0];
+                                                  timeout:10.0];
+    // Public catalog payloads never depend on the account: dropping the bearer
+    // token keeps the auth middleware out of a 1000-request crawl.
+    [request setValue:nil forHTTPHeaderField:@"Authorization"];
+
+    __block BOOL settled = NO;
     NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request
                                                completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (settled) {
+            return;
+        }
+        settled = YES;
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         NSInteger status = http ? http.statusCode : 0;
         id json = nil;
@@ -585,10 +597,11 @@ static NSString *LumiEncodePath(NSString *path) {
             return;
         }
 
-        NSUInteger maxAttempts = (status == 429) ? 4 : 2;
+        BOOL cancelled = (error.code == NSURLErrorCancelled);
+        NSUInteger maxAttempts = 4;
         BOOL retryable = (error != nil || status == 429 || status >= 500 || status == 0);
         if (retryable && attempt + 1 < maxAttempts) {
-            double delay = 0.5;
+            double delay = 0.35 + 0.35 * (double)attempt;
             if (status == 429) {
                 delay = (double)(1 << MIN(attempt, (NSUInteger)4));
             }
@@ -603,10 +616,21 @@ static NSString *LumiEncodePath(NSString *path) {
         }
 
         NSString *message = status ? [NSString stringWithFormat:@"HTTP %ld", (long)status]
-                                   : (error.localizedDescription ?: @"Сетевая ошибка");
-        completion(json, LumiError(status ?: 500, message));
+                                   : (cancelled ? @"Тайм-аут соединения" : (error.localizedDescription ?: @"Сетевая ошибка"));
+        completion(json, LumiError(status ?: (cancelled ? 408 : 500), message));
     }];
     [task resume];
+
+    // iOS sometimes keeps a dead TLS handshake "alive" forever (HTTP/2 pings
+    // stop the idle timer), so a request can hang for minutes while occupying
+    // one of the few connection slots. Cancel it ourselves and let the retry
+    // path open a fresh connection.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(9.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        if (!settled) {
+            [task cancel];
+        }
+    });
 }
 
 - (void)fetchTagsWithCompletion:(LumiAPICompletion)completion {

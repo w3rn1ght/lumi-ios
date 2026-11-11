@@ -609,185 +609,207 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     [self notifyUpdateNow];
 }
 
-/// Runs a fixed number of workers (no thread blocking) so 1000+ requests cannot
-/// starve NSURLSession's delegate queue.
-- (void)syncDetailsForIDs:(NSArray<NSString *> *)ids
+/// Downloads details with a fixed worker pool (no thread blocking). A single
+/// dead TLS handshake must not end the whole catalog: failed IDs are retried in
+/// up to three passes, and the API itself cancels hung requests after 9 s.
+- (void)syncDetailsForIDs:(NSArray<NSString *> *)identifiers
                      kind:(LumiCatalogSyncKind)kind
               alreadyDone:(NSUInteger)alreadyDone
              overallTotal:(NSUInteger)overallTotal
                completion:(void (^)(NSUInteger failed))completion {
-    NSUInteger total = ids.count;
-    if (total == 0) {
+    NSArray<NSString *> *ids = [identifiers copy];
+    if (!ids.count) {
         completion(0);
         return;
     }
+
     LumiAPI *api = self.api;
     dispatch_queue_t scheduler = dispatch_queue_create("com.w3rn1ght.lumi.catalog.workers", DISPATCH_QUEUE_SERIAL);
-    __block NSUInteger nextIndex = 0;
-    __block NSUInteger completed = 0;
-    __block NSUInteger failed = 0;
-    __block NSUInteger inFlight = 0;
-    __block NSUInteger rateLimited = 0;
-    __block NSUInteger workers = kDetailInitialWorkers;
-    __block BOOL finished = NO;
-    NSUInteger maxWorkers = kDetailConcurrency;
-    __block __weak void (^weakPump)(void);
-    __block void (^pump)(void);
-    __weak typeof(self) weakSelf = self;
     NSString *phase = kind == LumiCatalogSyncKindCharacter ? @"Персонажи" : @"Истории";
     NSString *kindSlug = kind == LumiCatalogSyncKindCharacter ? @"characters" : @"stories";
     NSUInteger reportEvery = kind == LumiCatalogSyncKindCharacter ? 5 : 4;
     NSUInteger saveEvery = kind == LumiCatalogSyncKindCharacter ? 50 : 40;
+    NSUInteger totalIDs = ids.count;
+    __weak typeof(self) weakSelf = self;
+    __block BOOL finished = NO;
+    __block NSUInteger succeeded = 0;
+    __block NSUInteger activity = 0;
+    __block void (^weakRunPass)(NSArray<NSString *> *, NSUInteger);
+    __block void (^runPass)(NSArray<NSString *> *, NSUInteger);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         weakSelf.syncFailedCount = 0;
         weakSelf.syncRateLimited = NO;
     });
 
-    pump = ^{
-        if (finished) {
-            return;
-        }
+    runPass = ^(NSArray<NSString *> *passIDs, NSUInteger passIndex) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) {
+        if (!strongSelf || finished) {
             return;
         }
-        while (inFlight < workers && nextIndex < total) {
-            NSString *identifier = ids[nextIndex];
-            nextIndex += 1;
-            inFlight += 1;
-            LumiAPICompletion handler = ^(id result, NSError *error) {
-                if (finished) {
-                    return;
-                }
-                BOOL ok = [result isKindOfClass:[NSDictionary class]];
-                if (ok) {
-                    if (kind == LumiCatalogSyncKindCharacter) {
-                        [strongSelf addCharacterDetail:result];
-                    } else {
-                        [strongSelf addStoryDetail:result];
-                    }
-                }
-                dispatch_async(scheduler, ^{
-                    completed += 1;
-                    if (!ok) {
-                        failed += 1;
-                        BOOL limited = (error.code == 429);
-                        if (limited) {
-                            rateLimited += 1;
-                        }
-                        if (!limited && error.code == 0) {
-                            // Transport errors: keep going, they are usually transient.
-                        }
-                    }
-                    inFlight -= 1;
-
-                    // Adaptive back-off: if the server throttles, lower concurrency
-                    // (min 3). Recover slowly when everything succeeds again.
-                    if (rateLimited > 0 && completed % 12 == 0) {
-                        workers = workers > kDetailMinimumWorkers ? workers - 4 : kDetailMinimumWorkers;
-                        if (workers < kDetailMinimumWorkers) {
-                            workers = kDetailMinimumWorkers;
-                        }
-                    } else if (rateLimited == 0 && workers < maxWorkers && completed % 40 == 0) {
-                        workers += 2;
-                        if (workers > maxWorkers) {
-                            workers = maxWorkers;
-                        }
-                    }
-
-                    NSUInteger done = alreadyDone + completed;
-                    if (completed % reportEvery == 0 || completed == total) {
-                        NSUInteger failedSnapshot = failed;
-                        NSUInteger doneSnapshot = done;
-                        NSUInteger totalSnapshot = total;
-                        BOOL limitedSnapshot = rateLimited > 0;
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            if (kind == LumiCatalogSyncKindCharacter) {
-                                strongSelf.syncedCharacterCount = doneSnapshot;
-                            } else {
-                                strongSelf.syncedStoryCount = doneSnapshot;
-                            }
-                            strongSelf.syncFailedCount = failedSnapshot;
-                            strongSelf.syncRateLimited = limitedSnapshot;
-                            [strongSelf updateProgressWithPhase:phase phaseDone:doneSnapshot phaseTotal:overallTotal];
-                            [strongSelf recalculateProgress];
-                            [strongSelf notifyUpdate];
-                        });
-                        if (completed % saveEvery == 0) {
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                [strongSelf saveCache];
-                            });
-                        }
-                        if (doneSnapshot % 100 < reportEvery) {
-                            [LumiDiagnostics log:@"%@: %lu / %lu", phase,
-                             (unsigned long)doneSnapshot, (unsigned long)totalSnapshot];
-                        }
-                    }
-                    if (completed == total) {
-                        if (finished) {
-                            return;
-                        }
-                        finished = true;
-                        NSUInteger failedFinal = failed;
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            completion(failedFinal);
-                        });
-                        return;
-                    }
-                    void (^nextPump)(void) = weakPump;
-                    if (nextPump) {
-                        nextPump();
-                    }
-                });
-            };
-            [api fetchCatalogDetailWithKind:kindSlug
-                                 identifier:identifier
-                      includeFailureStatus:YES
-                                 completion:handler];
-        }
-    };
-    weakPump = pump;
-    dispatch_async(scheduler, pump);
-
-    // Watchdog: a single hung TCP/TLS request must not freeze the whole
-    // download forever (iOS sometimes waits minutes on a dead handshake).
-    // If nothing completes for ~45 s, stop and report the remainder as failed
-    // so the user can retry with pull-to-refresh.
-    __block NSUInteger lastCompleted = 0;
-    __block NSUInteger stallTicks = 0;
-    __block __weak void (^weakWatchdog)(void);
-    __block void (^watchdog)(void);
-    watchdog = ^{
-        if (finished) {
-            return;
-        }
-        if (completed != lastCompleted) {
-            lastCompleted = completed;
-            stallTicks = 0;
-        } else {
-            stallTicks += 1;
-        }
-        if (stallTicks >= 9) {
+        NSUInteger total = passIDs.count;
+        if (total == 0) {
             finished = YES;
-            NSUInteger missing = total > completed ? total - completed : 0;
-            NSUInteger failedFinal = failed + missing;
-            NSLog(@"[Lumi] catalog watchdog: %lu of %lu details unfinished",
-                  (unsigned long)missing, (unsigned long)total);
             dispatch_async(dispatch_get_main_queue(), ^{
-                completion(failedFinal);
+                completion(0);
             });
             return;
         }
-        void (^nextWatchdog)(void) = weakWatchdog;
-        if (nextWatchdog) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                           scheduler, nextWatchdog);
-        }
+
+        __block NSUInteger nextIndex = 0;
+        __block NSUInteger completed = 0;
+        __block NSUInteger inFlight = 0;
+        __block NSUInteger rateLimited = 0;
+        const NSUInteger workers = 6;
+        NSMutableArray<NSString *> *failedIDs = [NSMutableArray array];
+        __block void (^pump)(void);
+        __block __weak void (^weakPump)(void);
+
+        pump = ^{
+            if (finished) {
+                return;
+            }
+            while (inFlight < workers && nextIndex < total) {
+                NSString *identifier = passIDs[nextIndex];
+                nextIndex += 1;
+                inFlight += 1;
+                [api fetchCatalogDetailWithKind:kindSlug
+                                     identifier:identifier
+                          includeFailureStatus:YES
+                                     completion:^(id result, NSError *error) {
+                    BOOL ok = !error && [result isKindOfClass:[NSDictionary class]];
+                    if (ok) {
+                        if (kind == LumiCatalogSyncKindCharacter) {
+                            [strongSelf addCharacterDetail:result];
+                        } else {
+                            [strongSelf addStoryDetail:result];
+                        }
+                    }
+                    dispatch_async(scheduler, ^{
+                        if (finished) {
+                            return;
+                        }
+                        activity += 1;
+                        completed += 1;
+                        inFlight -= 1;
+                        if (ok) {
+                            succeeded += 1;
+                        } else {
+                            [failedIDs addObject:identifier];
+                            if (error.code == 429) {
+                                rateLimited += 1;
+                            }
+                        }
+
+                        if (completed % reportEvery == 0 || completed == total) {
+                            NSUInteger doneSnapshot = MIN(alreadyDone + succeeded, overallTotal);
+                            NSUInteger failedSnapshot = failedIDs.count;
+                            BOOL limitedSnapshot = rateLimited > 0;
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                if (kind == LumiCatalogSyncKindCharacter) {
+                                    strongSelf.syncedCharacterCount = doneSnapshot;
+                                } else {
+                                    strongSelf.syncedStoryCount = doneSnapshot;
+                                }
+                                strongSelf.syncFailedCount = failedSnapshot;
+                                strongSelf.syncRateLimited = limitedSnapshot;
+                                [strongSelf updateProgressWithPhase:phase
+                                                          phaseDone:doneSnapshot
+                                                         phaseTotal:overallTotal];
+                                [strongSelf recalculateProgress];
+                                [strongSelf notifyUpdate];
+                            });
+                            if (completed % saveEvery == 0) {
+                                dispatch_async(dispatch_get_main_queue(), ^{
+                                    [strongSelf saveCache];
+                                });
+                            }
+                        }
+
+                        if (completed == total) {
+                            if (failedIDs.count > 0 && passIndex < 2) {
+                                NSArray<NSString *> *retryIDs = [failedIDs copy];
+                                NSUInteger nextPass = passIndex + 1;
+                                NSLog(@"[Lumi] catalog: pass %lu failed %lu of %lu, retrying",
+                                      (unsigned long)(passIndex + 1),
+                                      (unsigned long)retryIDs.count,
+                                      (unsigned long)total);
+                                [LumiDiagnostics log:@"каталог: повтор %lu — осталось %lu из %lu",
+                                 (unsigned long)nextPass, (unsigned long)retryIDs.count,
+                                 (unsigned long)total];
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                                               scheduler, ^{
+                                    void (^next)(NSArray<NSString *> *, NSUInteger) = weakRunPass;
+                                    if (next) {
+                                        next(retryIDs, nextPass);
+                                    }
+                                });
+                            } else {
+                                finished = YES;
+                                NSUInteger failedFinal = failedIDs.count;
+                                dispatch_async(dispatch_get_main_queue(), ^{
+                                    completion(failedFinal);
+                                });
+                            }
+                            return;
+                        }
+
+                        void (^nextPump)(void) = weakPump;
+                        if (nextPump) {
+                            nextPump();
+                        }
+                    });
+                }];
+            }
+        };
+        weakPump = pump;
+        pump();
     };
-    weakWatchdog = watchdog;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                   scheduler, watchdog);
+
+    weakRunPass = runPass;
+    dispatch_async(scheduler, ^{
+        runPass(ids, 0);
+    });
+
+    // Last-resort watchdog. With per-request cancellation this should never
+    // fire; it only protects against a framework-level hang.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
+                   scheduler, ^{
+        __block NSUInteger lastActivity = activity;
+        __block NSUInteger stallTicks = 0;
+        __block void (^watchdog)(void);
+        __block __weak void (^weakWatchdog)(void);
+        watchdog = ^{
+            if (finished) {
+                return;
+            }
+            if (activity != lastActivity) {
+                lastActivity = activity;
+                stallTicks = 0;
+            } else {
+                stallTicks += 1;
+            }
+            if (stallTicks >= 12) {
+                finished = YES;
+                NSUInteger missing = totalIDs > succeeded ? totalIDs - succeeded : 0;
+                NSLog(@"[Lumi] catalog watchdog: %lu of %lu details unfinished",
+                      (unsigned long)missing, (unsigned long)totalIDs);
+                [LumiDiagnostics log:@"каталог: сторож остановил загрузку, не хватает %lu из %lu",
+                 (unsigned long)missing, (unsigned long)totalIDs];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(missing);
+                });
+                return;
+            }
+            void (^nextWatchdog)(void) = weakWatchdog;
+            if (nextWatchdog) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                               scheduler, nextWatchdog);
+            }
+        };
+        weakWatchdog = watchdog;
+        watchdog();
+    });
 }
 
 #pragma mark - Detail handling
