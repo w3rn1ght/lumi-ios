@@ -1,6 +1,6 @@
 Package: com.w3rn1ght.lumi
 Name: Lumi
-Version: 1.4.1
+Version: 1.4.2
 Architecture: iphoneos-arm
 Description: Native API client for Lumi.ai, built for jailbroken iOS 12 devices. Full catalog, stories, genres, search, synced chats, WebP avatars.
 Homepage: https://lumi.site

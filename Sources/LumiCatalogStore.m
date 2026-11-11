@@ -17,10 +17,13 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 };
 
 @interface LumiCatalogStore ()
-@property (nonatomic, copy, readwrite) NSArray<NSDictionary *> *characters;
-@property (nonatomic, copy, readwrite) NSArray<NSDictionary *> *stories;
-@property (nonatomic, copy, readwrite) NSArray<NSString *> *characterTags;
-@property (nonatomic, copy, readwrite) NSArray<NSString *> *storyTags;
+// Deliberately atomic: they are reassigned on the serial state queue while the
+// chat list / catalog screens read them on the main thread. A nonatomic getter
+// racing a setter can over-release the array and kill the app.
+@property (copy, readwrite) NSArray<NSDictionary *> *characters;
+@property (copy, readwrite) NSArray<NSDictionary *> *stories;
+@property (copy, readwrite) NSArray<NSString *> *characterTags;
+@property (copy, readwrite) NSArray<NSString *> *storyTags;
 @property (nonatomic, assign, readwrite) BOOL isSyncing;
 @property (nonatomic, assign, readwrite) NSUInteger syncedCharacterCount;
 @property (nonatomic, assign, readwrite) NSUInteger totalCharacterCount;

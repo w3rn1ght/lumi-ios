@@ -845,6 +845,10 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     LumiMessageCell *cell = [tableView dequeueReusableCellWithIdentifier:@"message" forIndexPath:indexPath];
+    if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.messages.count) {
+        [cell configureWithText:@"" isUser:NO pending:NO photoURLs:@[]];
+        return cell;
+    }
     NSDictionary *message = self.messages[indexPath.row];
     BOOL isUser = [message[@"is_user"] boolValue];
     BOOL pending = [message[@"pending"] boolValue];
