@@ -790,7 +790,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             } else {
                 stallTicks += 1;
             }
-            if (stallTicks >= 12) {
+            if (stallTicks >= 30) {
                 finished = YES;
                 NSUInteger missing = totalIDs > succeeded ? totalIDs - succeeded : 0;
                 NSLog(@"[Lumi] catalog watchdog: %lu of %lu details unfinished",
