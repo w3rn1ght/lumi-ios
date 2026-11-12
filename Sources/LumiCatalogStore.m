@@ -773,7 +773,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 
     // Last-resort watchdog. With per-request cancellation this should never
     // fire; it only protects against a framework-level hang.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
+    // Extended to 30 seconds to allow retries for failed requests (up to 3 passes).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)),
                    scheduler, ^{
         __block NSUInteger lastActivity = activity;
         __block NSUInteger stallTicks = 0;
