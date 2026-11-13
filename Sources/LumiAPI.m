@@ -170,10 +170,10 @@ static NSString *LumiEncodePath(NSString *path) {
 @property (nonatomic, strong, readwrite, nullable) NSString *accessToken;
 @property (nonatomic, strong, readwrite, nullable) NSString *refreshToken;
 @property (nonatomic, strong) NSURLSession *session;
-- (void)fetchCatalogDetailWithKind:(NSString *)kind
-                        identifier:(NSString *)identifier
-                           attempt:(NSUInteger)attempt
-                        completion:(LumiAPICompletion)completion;
+- (void)catalogFetchKind:(NSString *)kind
+              identifier:(NSString *)identifier
+                 attempt:(NSUInteger)attempt
+              completion:(LumiAPICompletion)completion;
 @end
 
 @implementation LumiAPI
@@ -547,90 +547,119 @@ static NSString *LumiEncodePath(NSString *path) {
 
 #pragma mark - Catalog detail (off-main)
 
-/// Bulk catalog loading issues ~1400 requests. The generic `performRequest:`
-/// always hops to the main queue, which turned the detail download into a
-/// crawl and froze the progress bar. This variant parses and delivers on the
-/// session's own queue, retries a bounded number of times and never retries
-/// forever (the old 429 path could loop indefinitely).
+/// Bulk catalog loading issues ~1000 requests. Two things make this different
+/// from the generic `performRequest:` path:
+///
+/// 1. Every attempt gets its own ephemeral NSURLSession with a single
+///    connection and `Connection: close`. A stale/wedged HTTP/2 connection on
+///    the shared session used to hang the request forever and poison every
+///    later request multiplexed onto it.
+/// 2. The deadline is enforced by ourselves: when it fires we settle the
+///    request, tear the session down and retry on a *new* connection. We never
+///    depend on `[task cancel]` delivering a completion handler — it often
+///    does not, which left workers stuck forever and stopped the whole sync.
 - (void)fetchCatalogDetailWithKind:(NSString *)kind
                         identifier:(NSString *)identifier
              includeFailureStatus:(BOOL)includeFailureStatus
                         completion:(LumiAPICompletion)completion {
-    [self fetchCatalogDetailWithKind:kind
-                          identifier:identifier
-                             attempt:0
-                          completion:completion];
+    (void)includeFailureStatus;
+    [self catalogFetchKind:kind identifier:identifier attempt:0 completion:completion];
 }
 
-- (void)fetchCatalogDetailWithKind:(NSString *)kind
-                        identifier:(NSString *)identifier
-                           attempt:(NSUInteger)attempt
-                        completion:(LumiAPICompletion)completion {
+- (void)catalogFetchKind:(NSString *)kind
+              identifier:(NSString *)identifier
+                 attempt:(NSUInteger)attempt
+              completion:(LumiAPICompletion)completion {
     if (!completion) {
         return;
     }
+
     NSString *path = [NSString stringWithFormat:@"/public/%@/%@", kind, identifier];
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:path
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:25.0];
+    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    configuration.timeoutIntervalForRequest = 10.0;
+    configuration.timeoutIntervalForResource = 10.0;
+    configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    configuration.HTTPMaximumConnectionsPerHost = 1;
+    configuration.HTTPShouldUsePipelining = NO;
+    configuration.HTTPShouldSetCookies = NO;
+    configuration.HTTPCookieStorage = nil;
+    configuration.URLCache = nil;
+    configuration.HTTPAdditionalHeaders = @{
+        @"Accept": @"application/json",
+        @"Accept-Language": @"ru,en;q=0.8",
+        @"X-Lang": @"ru",
+        @"Origin": kWebOrigin,
+        @"Referer": [kWebOrigin stringByAppendingString:@"/"],
+        @"X-Lumi-Client": @"ios-app",
+        @"Connection": @"close",
+    };
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[kAPIBaseURL stringByAppendingString:path]]];
+    request.HTTPMethod = @"GET";
+    request.timeoutInterval = 10.0;
+    request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     // Public catalog payloads never depend on the account: dropping the bearer
     // token keeps the auth middleware out of a 1000-request crawl.
     [request setValue:nil forHTTPHeaderField:@"Authorization"];
 
+    NSObject *gate = [[NSObject alloc] init];
     __block BOOL settled = NO;
-    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request
-                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (settled) {
-            return;
+
+    void (^settle)(NSData *, NSURLResponse *, NSError *, BOOL) = ^(NSData *data, NSURLResponse *response, NSError *error, BOOL timedOut) {
+        @synchronized (gate) {
+            if (settled) {
+                return;
+            }
+            settled = YES;
         }
-        settled = YES;
+        [session invalidateAndCancel];
+
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         NSInteger status = http ? http.statusCode : 0;
         id json = nil;
         if (data.length) {
             json = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
         }
-        if (!error && status >= 200 && status < 300 && [json isKindOfClass:[NSDictionary class]]) {
+        if (!timedOut && !error && status >= 200 && status < 300 && [json isKindOfClass:[NSDictionary class]]) {
             completion(json, nil);
             return;
         }
 
-        BOOL cancelled = (error.code == NSURLErrorCancelled);
         NSUInteger maxAttempts = 4;
-        BOOL retryable = (error != nil || status == 429 || status >= 500 || status == 0);
+        BOOL retryable = timedOut || error != nil || status == 429 || status >= 500 || status == 0;
         if (retryable && attempt + 1 < maxAttempts) {
-            double delay = 0.35 + 0.35 * (double)attempt;
+            double delay = 0.25 + 0.35 * (double)attempt;
             if (status == 429) {
                 delay = (double)(1 << MIN(attempt, (NSUInteger)4));
             }
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                            dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                [self fetchCatalogDetailWithKind:kind
-                                      identifier:identifier
-                                         attempt:attempt + 1
-                                      completion:completion];
+                [self catalogFetchKind:kind
+                            identifier:identifier
+                               attempt:attempt + 1
+                            completion:completion];
             });
             return;
         }
 
-        NSString *message = status ? [NSString stringWithFormat:@"HTTP %ld", (long)status]
-                                   : (cancelled ? @"Тайм-аут соединения" : (error.localizedDescription ?: @"Сетевая ошибка"));
-        completion(json, LumiError(status ?: (cancelled ? 408 : 500), message));
+        NSString *message = timedOut ? @"Тайм-аут соединения"
+                           : (status ? [NSString stringWithFormat:@"HTTP %ld", (long)status]
+                                     : (error.localizedDescription ?: @"Сетевая ошибка"));
+        completion(json, LumiError(status ?: (timedOut ? 408 : 500), message));
+    };
+
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        settle(data, response, error, NO);
     }];
     [task resume];
 
-    // iOS sometimes keeps a dead TLS handshake "alive" forever (HTTP/2 pings
-    // stop the idle timer), so a request can hang for minutes while occupying
-    // one of the few connection slots. Cancel it ourselves and let the retry
-    // path open a fresh connection. Extended to 25s to tolerate slow server
-    // responses under load (cold-start / mobile networks).
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25.0 * NSEC_PER_SEC)),
+    // Hard deadline owned by us: settle + retry on a brand-new connection even
+    // if NSURLSession never calls the completion handler.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        if (!settled) {
-            [task cancel];
-        }
+        settle(nil, nil, nil, YES);
     });
 }
 

@@ -45,6 +45,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 @property (nonatomic, strong) dispatch_queue_t cacheQueue;
 @property (nonatomic, assign) BOOL notifyScheduled;
 @property (nonatomic, assign) NSTimeInterval lastNotifyTime;
+@property (nonatomic, assign) NSUInteger characterRetryRounds;
+@property (nonatomic, assign) BOOL pendingCharacterRetry;
 @end
 
 @implementation LumiCatalogStore
@@ -327,13 +329,21 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     if (self.isSyncing) {
         return;
     }
-    [self syncCharacterDetailsOnly];
+    // Must re-read the ID list: characters that never loaded are not part of
+    // `self.characters`, so `syncCharacterDetailsOnly` cannot see them.
+    self.isSyncing = YES;
+    self.syncPhase = @"Персонажи";
+    self.syncStatus = nil;
+    [self notifyUpdateNow];
+    [self syncCharacterIDs];
 }
 
 - (void)forceRefresh {
     if (self.isSyncing) {
         return;
     }
+    self.characterRetryRounds = 0;
+    self.pendingCharacterRetry = NO;
     [self startSyncWithPhase:@"Подготовка"];
     [self syncTags];
     [self syncCharacterIDs];
@@ -444,18 +454,56 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         if (!strongSelf) {
             return;
         }
+        if (failed > 0) {
+            [LumiDiagnostics log:@"каталог: не загрузилось %lu из %lu, повторю позже",
+             (unsigned long)failed, (unsigned long)missing.count];
+        }
         strongSelf.syncedCharacterCount = ids.count;
         [strongSelf updateProgressWithPhase:@"Персонажи" phaseDone:ids.count phaseTotal:ids.count];
         [strongSelf recalculateProgress];
-        if (failed > 0) {
-            [strongSelf failSyncWithError:nil
-                                 fallback:[NSString stringWithFormat:@"Не удалось загрузить %lu карточек персонажей. Потяните вниз, чтобы повторить.",
-                                           (unsigned long)failed]];
-            [strongSelf saveCache];
+        [strongSelf saveCache];
+        if (missing.count > 0 && failed == missing.count) {
+            [strongSelf failSyncWithError:nil fallback:@"Не удалось загрузить карточки персонажей. Проверьте соединение."];
             return;
+        }
+        if (failed > 0) {
+            [strongSelf scheduleCharacterRetry];
         }
         [strongSelf finishSync];
     }];
+}
+
+/// Partial failure is not a dead end: keep everything that was downloaded and
+/// silently fetch the leftovers in the background once the current sync ends
+/// (bounded, so a permanently broken card cannot spin forever).
+- (void)scheduleCharacterRetry {
+    if (self.characterRetryRounds >= 3) {
+        return;
+    }
+    self.pendingCharacterRetry = YES;
+}
+
+- (void)handleCharacterSyncCompletionWithFailed:(NSUInteger)failed
+                                        missing:(NSArray<NSString *> *)missing
+                                     overallIDs:(NSArray<NSString *> *)ids {
+    if (failed > 0) {
+        NSLog(@"[Lumi] %lu character details failed", (unsigned long)failed);
+        [LumiDiagnostics log:@"каталог: не загрузилось %lu из %lu, повторю позже",
+         (unsigned long)failed, (unsigned long)missing.count];
+    }
+    if (missing.count > 0 && failed == missing.count) {
+        [self failSyncWithError:nil fallback:@"Не удалось загрузить карточки персонажей. Проверьте соединение."];
+        return;
+    }
+    self.syncedCharacterCount = ids.count;
+    [self updateProgressWithPhase:@"Персонажи" phaseDone:ids.count phaseTotal:ids.count];
+    [self recalculateProgress];
+    [self notifyUpdate];
+    [self saveCache];
+    if (failed > 0) {
+        [self scheduleCharacterRetry];
+    }
+    [self syncStoryIDs];
 }
 
 - (void)syncCharacterIDs {
@@ -507,26 +555,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             if (!strongSelf) {
                 return;
             }
-            if (failed > 0) {
-                NSLog(@"[Lumi] %lu character details failed", (unsigned long)failed);
-            }
-            if (missing.count > 0 && failed == missing.count) {
-                [strongSelf failSyncWithError:nil fallback:@"Не удалось загрузить карточки персонажей. Проверьте соединение."];
-                return;
-            }
-            strongSelf.syncedCharacterCount = ids.count;
-            [strongSelf updateProgressWithPhase:@"Персонажи" phaseDone:ids.count phaseTotal:ids.count];
-            [strongSelf recalculateProgress];
-            [strongSelf notifyUpdate];
-            [strongSelf saveCache];
-            if (failed > 0) {
-                // Partial success: keep what we have and let the user retry the rest.
-                [strongSelf failSyncWithError:nil
-                                     fallback:[NSString stringWithFormat:@"Не удалось загрузить %lu персонажей из %lu. Потяните вниз, чтобы повторить загрузку.",
-                                               (unsigned long)failed, (unsigned long)ids.count]];
-                return;
-            }
-            [strongSelf syncStoryIDs];
+            [strongSelf handleCharacterSyncCompletionWithFailed:failed
+                                                        missing:missing
+                                                     overallIDs:ids];
         }];
     }];
 }
@@ -585,11 +616,13 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             strongSelf.syncedStoryCount = ids.count;
             [strongSelf updateProgressWithPhase:@"Истории" phaseDone:ids.count phaseTotal:ids.count];
             [strongSelf recalculateProgress];
+            [strongSelf saveCache];
             if (failed > 0) {
-                [strongSelf failSyncWithError:nil
-                                     fallback:[NSString stringWithFormat:@"Не удалось загрузить %lu историй из %lu. Потяните вниз, чтобы повторить загрузку.",
-                                               (unsigned long)failed, (unsigned long)ids.count]];
-                [strongSelf saveCache];
+                [LumiDiagnostics log:@"каталог: не загрузилось %lu историй из %lu",
+                 (unsigned long)failed, (unsigned long)missing.count];
+            }
+            if (missing.count > 0 && failed == missing.count) {
+                [strongSelf failSyncWithError:nil fallback:@"Не удалось загрузить истории. Проверьте соединение."];
                 return;
             }
             [strongSelf finishSync];
@@ -607,6 +640,18 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     [LumiDiagnostics log:@"каталог: готово — %lu персонажей / %lu историй",
      (unsigned long)self.characters.count, (unsigned long)self.stories.count];
     [self notifyUpdateNow];
+
+    if (self.pendingCharacterRetry) {
+        self.pendingCharacterRetry = NO;
+        if (self.characterRetryRounds < 3) {
+            self.characterRetryRounds += 1;
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [weakSelf retryFailedCharacterDetails];
+            });
+        }
+    }
 }
 
 /// Downloads details with a fixed worker pool (no thread blocking). A single
@@ -627,8 +672,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     dispatch_queue_t scheduler = dispatch_queue_create("com.w3rn1ght.lumi.catalog.workers", DISPATCH_QUEUE_SERIAL);
     NSString *phase = kind == LumiCatalogSyncKindCharacter ? @"Персонажи" : @"Истории";
     NSString *kindSlug = kind == LumiCatalogSyncKindCharacter ? @"characters" : @"stories";
-    NSUInteger reportEvery = kind == LumiCatalogSyncKindCharacter ? 5 : 4;
-    NSUInteger saveEvery = kind == LumiCatalogSyncKindCharacter ? 50 : 40;
+    NSUInteger reportEvery = kind == LumiCatalogSyncKindCharacter ? 10 : 8;
+    NSUInteger saveEvery = kind == LumiCatalogSyncKindCharacter ? 20 : 16;
     NSUInteger totalIDs = ids.count;
     __weak typeof(self) weakSelf = self;
     __block BOOL finished = NO;
