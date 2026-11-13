@@ -574,7 +574,7 @@ static NSString *LumiEncodePath(NSString *path) {
                                                      path:path
                                                   baseURL:kAPIBaseURL
                                                      body:nil
-                                                  timeout:10.0];
+                                                  timeout:25.0];
     // Public catalog payloads never depend on the account: dropping the bearer
     // token keeps the auth middleware out of a 1000-request crawl.
     [request setValue:nil forHTTPHeaderField:@"Authorization"];
@@ -624,8 +624,9 @@ static NSString *LumiEncodePath(NSString *path) {
     // iOS sometimes keeps a dead TLS handshake "alive" forever (HTTP/2 pings
     // stop the idle timer), so a request can hang for minutes while occupying
     // one of the few connection slots. Cancel it ourselves and let the retry
-    // path open a fresh connection.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(9.0 * NSEC_PER_SEC)),
+    // path open a fresh connection. Extended to 25s to tolerate slow server
+    // responses under load (cold-start / mobile networks).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         if (!settled) {
             [task cancel];

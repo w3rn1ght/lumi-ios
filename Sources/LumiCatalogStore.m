@@ -790,7 +790,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             } else {
                 stallTicks += 1;
             }
-            if (stallTicks >= 30) {
+            if (stallTicks >= 60) {
                 finished = YES;
                 NSUInteger missing = totalIDs > succeeded ? totalIDs - succeeded : 0;
                 NSLog(@"[Lumi] catalog watchdog: %lu of %lu details unfinished",
@@ -804,7 +804,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
             void (^nextWatchdog)(void) = weakWatchdog;
             if (nextWatchdog) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
                                scheduler, nextWatchdog);
             }
         };
