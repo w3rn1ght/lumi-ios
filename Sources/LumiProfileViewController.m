@@ -1,4 +1,4 @@
-﻿#import "LumiProfileViewController.h"
+#import "LumiProfileViewController.h"
 #import "LumiAPI.h"
 #import "LumiDiagnostics.h"
 #import "LumiCatalogStore.h"
