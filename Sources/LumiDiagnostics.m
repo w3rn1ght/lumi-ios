@@ -68,7 +68,11 @@ static void LumiFatalSignalHandler(int signalNumber) {
         signal(SIGILL, LumiFatalSignalHandler);
         signal(SIGFPE, LumiFatalSignalHandler);
 
-        [self log:@"──── Lumi запущен · %@ ────", [NSDate date]];
+        NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+        NSString *version = info[@"CFBundleShortVersionString"] ?: @"?";
+        NSString *build = info[@"CFBundleVersion"] ?: @"?";
+        [self log:@"──── Lumi запущен · v%@ (build %@) · %@ ────",
+         version, build, [NSDate date]];
     });
 }
 

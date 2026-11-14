@@ -709,6 +709,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         NSMutableArray<NSString *> *failedIDs = [NSMutableArray array];
         __block void (^pump)(void);
         __block __weak void (^weakPump)(void);
+        NSTimeInterval passStartedAt = [NSDate timeIntervalSinceReferenceDate];
+        [LumiDiagnostics log:@"каталог: старт %@ — %lu карточек, %lu воркеров",
+         phase, (unsigned long)total, (unsigned long)workers];
 
         pump = ^{
             if (finished) {
@@ -768,6 +771,12 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                                 dispatch_async(dispatch_get_main_queue(), ^{
                                     [strongSelf saveCache];
                                 });
+                            }
+                            if (completed % 100 == 0) {
+                                NSTimeInterval elapsed = [NSDate timeIntervalSinceReferenceDate] - passStartedAt;
+                                [LumiDiagnostics log:@"каталог: %lu/%lu за %.0f с, ошибок %lu",
+                                 (unsigned long)completed, (unsigned long)total, elapsed,
+                                 (unsigned long)failedIDs.count];
                             }
                         }
 
