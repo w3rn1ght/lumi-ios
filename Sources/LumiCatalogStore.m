@@ -679,8 +679,16 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     __block BOOL finished = NO;
     __block NSUInteger succeeded = 0;
     __block NSUInteger activity = 0;
-    __block void (^weakRunPass)(NSArray<NSString *> *, NSUInteger);
+    // Both blocks are held STRONG. The previous version kept `runPass`/`pump`
+    // as weak self-references, which silently killed the whole download: a
+    // `__block` variable that is not captured by any escaping block keeps its
+    // storage on the stack, so when `runPass` returned the block was released
+    // and `weakPump` became nil. The pool then started exactly `workers`
+    // requests (8 of 897) and never fetched another card again — which is
+    // precisely what the log showed. Cycles are broken by nil-ing both blocks
+    // on every terminal path.
     __block void (^runPass)(NSArray<NSString *> *, NSUInteger);
+    __block void (^pump)(void);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         weakSelf.syncFailedCount = 0;
@@ -710,8 +718,6 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         __block BOOL loggedFirstCard = NO;
         const NSUInteger workers = 8;
         NSMutableArray<NSString *> *failedIDs = [NSMutableArray array];
-        __block void (^pump)(void);
-        __block __weak void (^weakPump)(void);
         NSTimeInterval passStartedAt = [NSDate timeIntervalSinceReferenceDate];
         [LumiDiagnostics log:@"каталог: старт %@ — %lu карточек, %lu воркеров",
          phase, (unsigned long)total, (unsigned long)workers];
@@ -730,6 +736,17 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
              (unsigned long)completed, (unsigned long)total, (unsigned long)inFlight,
              (unsigned long)failedCount,
              [NSDate timeIntervalSinceReferenceDate] - passStartedAt];
+            // Self-healing: if the pool somehow lost its pump, restart it
+            // instead of sitting at "в работе 0" forever.
+            if (inFlight == 0 && completed < total) {
+                dispatch_async(scheduler, ^{
+                    if (!finished && pump && inFlight == 0 && completed < total) {
+                        [LumiDiagnostics log:@"каталог: воркеры простаивают, перезапускаю с %lu",
+                         (unsigned long)completed];
+                        pump();
+                    }
+                });
+            }
             void (^next)(void) = weakHeartbeat;
             if (next) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
@@ -830,9 +847,12 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                                 [LumiDiagnostics log:@"каталог: повтор %lu — осталось %lu из %lu",
                                  (unsigned long)nextPass, (unsigned long)retryIDs.count,
                                  (unsigned long)total];
+                                // Drop this pass's pool before the next one
+                                // starts so the blocks do not pile up.
+                                pump = nil;
                                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                                                scheduler, ^{
-                                    void (^next)(NSArray<NSString *> *, NSUInteger) = weakRunPass;
+                                    void (^next)(NSArray<NSString *> *, NSUInteger) = runPass;
                                     if (next) {
                                         next(retryIDs, nextPass);
                                     }
@@ -840,6 +860,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                             } else {
                                 finished = YES;
                                 NSUInteger failedFinal = failedIDs.count;
+                                pump = nil;
+                                runPass = nil;
                                 dispatch_async(dispatch_get_main_queue(), ^{
                                     completion(failedFinal);
                                 });
@@ -847,19 +869,14 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                             return;
                         }
 
-                        void (^nextPump)(void) = weakPump;
-                        if (nextPump) {
-                            nextPump();
-                        }
+                        pump();
                     });
                 }];
             }
         };
-        weakPump = pump;
         pump();
     };
 
-    weakRunPass = runPass;
     dispatch_async(scheduler, ^{
         runPass(ids, 0);
     });
@@ -885,6 +902,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
             if (stallTicks >= 60) {
                 finished = YES;
+                pump = nil;
+                runPass = nil;
                 NSUInteger missing = totalIDs > succeeded ? totalIDs - succeeded : 0;
                 NSLog(@"[Lumi] catalog watchdog: %lu of %lu details unfinished",
                       (unsigned long)missing, (unsigned long)totalIDs);

@@ -84,7 +84,7 @@
 
     UILabel *version = [[UILabel alloc] init];
     version.translatesAutoresizingMaskIntoConstraints = NO;
-    version.text = @"Lumi 1.4.6 · нативный клиент";
+    version.text = @"Lumi 1.4.7 · нативный клиент";
     version.textColor = LumiMutedColor();
     version.font = LumiFont(12.0, UIFontWeightRegular);
     version.textAlignment = NSTextAlignmentCenter;
