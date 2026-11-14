@@ -868,6 +868,83 @@ static const double kLumiLaneDeadline = 6.5;
     return stream;
 }
 
+- (LumiChatStream *)regenerateMessageWithID:(NSString *)messageID
+                                     chatID:(NSString *)chatID
+                               eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
+                                 completion:(void (^)(NSError *))completion {
+    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages/%@/variants", chatID, messageID];
+    LumiChatStream *stream = [[LumiChatStream alloc] initWithChatID:chatID
+                                                               path:path
+                                                               body:@{}
+                                                       eventHandler:eventHandler
+                                                         completion:completion];
+    [stream start];
+    return stream;
+}
+
+- (void)editMessageWithID:(NSString *)messageID
+                   chatID:(NSString *)chatID
+                  content:(NSString *)content
+               completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages/%@", chatID, messageID];
+    NSMutableURLRequest *request = [self requestWithMethod:@"PATCH"
+                                                     path:path
+                                                  baseURL:kAPIBaseURL
+                                                     body:@{@"content": content ?: @""}
+                                                  timeout:40.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)setActiveVariantIndex:(NSInteger)index
+                 forMessageID:(NSString *)messageID
+                       chatID:(NSString *)chatID
+                   completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages/%@/active-variant", chatID, messageID];
+    NSMutableURLRequest *request = [self requestWithMethod:@"PATCH"
+                                                     path:path
+                                                  baseURL:kAPIBaseURL
+                                                     body:@{@"index": @(index)}
+                                                  timeout:30.0];
+    [self performRequest:request completion:^(id result, NSError *error) {
+        if (completion) {
+            completion(result, error);
+        }
+    }];
+}
+
+- (void)fetchSparksWithCompletion:(LumiAPICompletion)completion {
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                     path:@"/me/sparks"
+                                                  baseURL:kAPIBaseURL
+                                                     body:nil
+                                                  timeout:25.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)generateChatPhotoForChatID:(NSString *)chatID
+                           quality:(NSString *)quality
+                        completion:(LumiAPICompletion)completion {
+    NSMutableDictionary *body = [NSMutableDictionary dictionary];
+    if (quality.length) {
+        body[@"quality"] = quality;
+    }
+    body[@"request_id"] = [[NSUUID UUID] UUIDString];
+    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
+                                                     path:[NSString stringWithFormat:@"/chats/%@/photo", chatID]
+                                                  baseURL:kAPIBaseURL
+                                                     body:body
+                                                  timeout:180.0];
+    [self performRequest:request completion:^(id result, NSError *error) {
+        if (error) {
+            completion(result, error);
+            return;
+        }
+        NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
+        NSDictionary *message = [dictionary[@"message"] isKindOfClass:[NSDictionary class]] ? dictionary[@"message"] : dictionary;
+        completion(message ?: @{}, nil);
+    }];
+}
+
 @end
 
 #pragma mark - SSE stream
@@ -875,6 +952,8 @@ static const double kLumiLaneDeadline = 6.5;
 @interface LumiChatStream () <NSURLSessionDataDelegate>
 @property (nonatomic, copy) NSString *chatID;
 @property (nonatomic, copy) NSString *content;
+@property (nonatomic, copy, nullable) NSString *path;
+@property (nonatomic, copy, nullable) NSDictionary *body;
 @property (nonatomic, copy) void (^eventHandler)(NSString *, NSDictionary *);
 @property (nonatomic, copy) void (^completion)(NSError *);
 @property (nonatomic, strong) NSURLSession *session;
@@ -901,6 +980,19 @@ static const double kLumiLaneDeadline = 6.5;
     return self;
 }
 
+- (instancetype)initWithChatID:(NSString *)chatID
+                          path:(NSString *)path
+                          body:(NSDictionary *)body
+                  eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
+                    completion:(void (^)(NSError *))completion {
+    self = [self initWithChatID:chatID content:@"" eventHandler:eventHandler completion:completion];
+    if (self) {
+        _path = [path copy];
+        _body = [body copy];
+    }
+    return self;
+}
+
 - (void)start {
     NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
     configuration.timeoutIntervalForRequest = 120.0;
@@ -909,7 +1001,8 @@ static const double kLumiLaneDeadline = 6.5;
     configuration.HTTPShouldSetCookies = YES;
     self.session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
 
-    NSString *urlString = [NSString stringWithFormat:@"%@/chats/%@/messages", kAPIBaseURL, self.chatID];
+    NSString *path = self.path.length ? self.path : [NSString stringWithFormat:@"/chats/%@/messages", self.chatID];
+    NSString *urlString = [kAPIBaseURL stringByAppendingString:LumiEncodePath(path)];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
     request.HTTPMethod = @"POST";
     request.timeoutInterval = 180.0;
@@ -923,8 +1016,8 @@ static const double kLumiLaneDeadline = 6.5;
     if (token.length) {
         [request setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
     }
-    request.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"content": self.content ?: @""}
-                                                      options:0 error:NULL];
+    NSDictionary *body = self.body ?: @{@"content": self.content ?: @""};
+    request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:NULL];
     self.task = [self.session dataTaskWithRequest:request];
     [self.task resume];
 }

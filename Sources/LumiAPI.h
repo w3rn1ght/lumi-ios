@@ -80,6 +80,36 @@ extern NSString *const LumiAuthDidChangeNotification;
                    eventHandler:(void (^)(NSString *type, NSDictionary *payload))eventHandler
                      completion:(void (^)(NSError * _Nullable error))completion;
 
+/// Re-generates an existing model message into a new variant.
+/// Streams POST /chats/{id}/messages/{messageID}/variants.
+- (LumiChatStream *)regenerateMessageWithID:(NSString *)messageID
+                                     chatID:(NSString *)chatID
+                               eventHandler:(void (^)(NSString *type, NSDictionary *payload))eventHandler
+                                 completion:(void (^)(NSError * _Nullable error))completion;
+
+/// PATCH /chats/{id}/messages/{messageID}. Works for user and model messages.
+- (void)editMessageWithID:(NSString *)messageID
+                   chatID:(NSString *)chatID
+                  content:(NSString *)content
+               completion:(LumiAPICompletion)completion;
+
+/// PATCH /chats/{id}/messages/{messageID}/active-variant with a 0-based index.
+- (void)setActiveVariantIndex:(NSInteger)index
+                 forMessageID:(NSString *)messageID
+                       chatID:(NSString *)chatID
+                   completion:(nullable LumiAPICompletion)completion;
+
+#pragma mark - Sparks & photos
+
+/// GET /me/sparks -> { balance, tariffs }.
+- (void)fetchSparksWithCompletion:(LumiAPICompletion)completion;
+
+/// POST /chats/{id}/photo. `quality` is "standard" (fast) or "enhanced"
+/// (detailed). Resolves to the created message dictionary.
+- (void)generateChatPhotoForChatID:(NSString *)chatID
+                           quality:(nullable NSString *)quality
+                        completion:(LumiAPICompletion)completion;
+
 @end
 
 #pragma mark - SSE helper

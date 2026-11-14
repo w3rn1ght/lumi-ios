@@ -56,6 +56,13 @@ extern NSString *const LumiCatalogDidUpdateNotification;
 - (NSArray<NSDictionary *> *)charactersMatchingQuery:(nullable NSString *)query tag:(nullable NSString *)tag;
 - (NSArray<NSDictionary *> *)storiesMatchingQuery:(nullable NSString *)query tag:(nullable NSString *)tag;
 
+/// Multi-select variants: an item matches when it has *any* of the given tags.
+/// An empty array (or one containing only "Все") means "no genre filter".
+- (NSArray<NSDictionary *> *)charactersMatchingQuery:(nullable NSString *)query
+                                                tags:(nullable NSArray<NSString *> *)tags;
+- (NSArray<NSDictionary *> *)storiesMatchingQuery:(nullable NSString *)query
+                                             tags:(nullable NSArray<NSString *> *)tags;
+
 - (nullable NSDictionary *)characterWithID:(nullable NSString *)identifier;
 - (nullable NSDictionary *)storyWithID:(nullable NSString *)identifier;
 

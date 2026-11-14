@@ -9,6 +9,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     LumiCatalogModeStories = 1,
 };
 
+/// How many genre chips can be active at the same time.
+static const NSInteger kLumiMaxSelectedGenres = 5;
+
 @interface LumiCatalogCell : UITableViewCell
 @property (nonatomic, strong) UIImageView *thumb;
 @property (nonatomic, strong) UILabel *titleLabel;
@@ -156,7 +159,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
-@property (nonatomic, copy) NSString *selectedTag;
+/// Up to `kLumiMaxSelectedGenres` genres may be active at once; an empty array
+/// means "Все".
+@property (nonatomic, strong) NSMutableArray<NSString *> *selectedTags;
 @property (nonatomic, copy) NSArray<NSDictionary *> *items;
 @property (nonatomic, assign) LumiCatalogMode mode;
 @property (nonatomic, copy, nullable) NSString *lastContentSignature;
@@ -169,7 +174,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     self.view.backgroundColor = LumiBackgroundColor();
     self.title = @"Каталог";
     self.store = [LumiCatalogStore sharedStore];
-    self.selectedTag = @"Все";
+    self.selectedTags = [NSMutableArray array];
     self.items = @[];
 
     self.segmentedControl = [[UISegmentedControl alloc] initWithItems:@[@"Персонажи", @"Истории"]];
@@ -309,7 +314,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
 
 - (void)modeChanged {
     self.mode = self.segmentedControl.selectedSegmentIndex == 1 ? LumiCatalogModeStories : LumiCatalogModeCharacters;
-    self.selectedTag = @"Все";
+    [self.selectedTags removeAllObjects];
     self.searchBar.placeholder = self.mode == LumiCatalogModeStories ? @"Поиск историй" : @"Поиск персонажей";
     [self rebuildChips];
     [self reloadItems];
@@ -330,7 +335,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
         chip.layer.cornerRadius = 14.0;
         chip.contentEdgeInsets = UIEdgeInsetsMake(6.0, 14.0, 6.0, 14.0);
         chip.tag = [genres indexOfObject:genre];
-        BOOL selected = [genre isEqualToString:self.selectedTag];
+        BOOL selected = [genre isEqualToString:@"Все"]
+            ? self.selectedTags.count == 0
+            : [self.selectedTags containsObject:genre];
         chip.backgroundColor = selected ? LumiAccentColor() : LumiSurfaceColor();
         [chip setTitleColor:selected ? [UIColor whiteColor] : LumiMutedColor() forState:UIControlStateNormal];
         [chip addTarget:self action:@selector(chipTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -359,7 +366,26 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
     if (sender.tag < 0 || sender.tag >= (NSInteger)genres.count) {
         return;
     }
-    self.selectedTag = genres[sender.tag];
+    NSString *genre = genres[sender.tag];
+    if ([genre isEqualToString:@"Все"]) {
+        [self.selectedTags removeAllObjects];
+    } else if ([self.selectedTags containsObject:genre]) {
+        [self.selectedTags removeObject:genre];
+    } else {
+        if (self.selectedTags.count >= kLumiMaxSelectedGenres) {
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Максимум категорий"
+                                 message:[NSString stringWithFormat:@"Можно выбрать не больше %d категорий одновременно.",
+                                          kLumiMaxSelectedGenres]
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Понятно"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        [self.selectedTags addObject:genre];
+    }
     [self rebuildChips];
     [self reloadItems];
 }
@@ -382,11 +408,12 @@ typedef NS_ENUM(NSInteger, LumiCatalogMode) {
 - (void)refreshFromStore {
     NSString *query = self.searchBar.text ?: @"";
     NSArray *items = self.mode == LumiCatalogModeStories
-        ? [self.store storiesMatchingQuery:query tag:self.selectedTag]
-        : [self.store charactersMatchingQuery:query tag:self.selectedTag];
+        ? [self.store storiesMatchingQuery:query tags:self.selectedTags]
+        : [self.store charactersMatchingQuery:query tags:self.selectedTags];
+    NSString *tagSignature = [self.selectedTags componentsJoinedByString:@"+"] ?: @"";
     NSString *signature = [NSString stringWithFormat:@"%ld|%@|%@|%lu|%lu|%lu",
                            (long)self.mode,
-                           self.selectedTag ?: @"",
+                           tagSignature,
                            query,
                            (unsigned long)items.count,
                            (unsigned long)self.store.characters.count,

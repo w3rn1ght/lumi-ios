@@ -1080,19 +1080,32 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 
 - (NSArray<NSDictionary *> *)filterItems:(NSArray<NSDictionary *> *)items
                                    query:(NSString *)query
-                                     tag:(NSString *)tag
-                          primaryKeyName:(NSString *)primaryKey
+                                    tags:(NSArray<NSString *> *)tags
+                         primaryKeyName:(NSString *)primaryKey
                        secondaryKeyName:(NSString *)secondaryKey {
     NSArray *sorted = [self sortedCharacters:items];
-    BOOL filterTag = tag.length && ![tag isEqualToString:@"Все"];
+    NSMutableSet<NSString *> *wantedTags = [NSMutableSet set];
+    for (NSString *tag in tags) {
+        if ([tag isKindOfClass:[NSString class]] && tag.length && ![tag isEqualToString:@"Все"]) {
+            [wantedTags addObject:tag];
+        }
+    }
+    BOOL filterTags = wantedTags.count > 0;
     NSString *trimmed = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSString *lowercaseQuery = trimmed.lowercaseString;
 
     NSMutableArray *result = [NSMutableArray array];
     for (NSDictionary *item in sorted) {
-        if (filterTag) {
-            NSArray *tags = LumiAsArray(LumiValue(item, @"tags"));
-            if (!tags || ![tags containsObject:tag]) {
+        if (filterTags) {
+            NSArray *itemTags = LumiAsArray(LumiValue(item, @"tags"));
+            BOOL matchedTag = NO;
+            for (id tag in itemTags) {
+                if ([tag isKindOfClass:[NSString class]] && [wantedTags containsObject:tag]) {
+                    matchedTag = YES;
+                    break;
+                }
+            }
+            if (!matchedTag) {
                 continue;
             }
         }
@@ -1135,11 +1148,27 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 }
 
 - (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query tag:(NSString *)tag {
-    return [self filterItems:self.characters query:query tag:tag primaryKeyName:@"name" secondaryKeyName:@"tagline"];
+    return [self charactersMatchingQuery:query tags:(tag.length ? @[tag] : nil)];
 }
 
 - (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query tag:(NSString *)tag {
-    return [self filterItems:self.stories query:query tag:tag primaryKeyName:@"title" secondaryKeyName:@"description"];
+    return [self storiesMatchingQuery:query tags:(tag.length ? @[tag] : nil)];
+}
+
+- (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query tags:(NSArray<NSString *> *)tags {
+    return [self filterItems:self.characters
+                       query:query
+                        tags:tags ?: @[]
+             primaryKeyName:@"name"
+           secondaryKeyName:@"tagline"];
+}
+
+- (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query tags:(NSArray<NSString *> *)tags {
+    return [self filterItems:self.stories
+                       query:query
+                        tags:tags ?: @[]
+             primaryKeyName:@"title"
+           secondaryKeyName:@"description"];
 }
 
 - (NSDictionary *)characterWithID:(NSString *)identifier {

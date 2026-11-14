@@ -104,7 +104,15 @@ static CGFloat LumiPhotoHeightForRatio(CGFloat ratio, CGFloat width) {
 @property (nonatomic, strong) NSLayoutConstraint *leadingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *trailingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *photoStackHeightConstraint;
+@property (nonatomic, strong) UIStackView *variantBar;
+@property (nonatomic, strong) UIButton *variantPrevButton;
+@property (nonatomic, strong) UIButton *variantNextButton;
+@property (nonatomic, strong) UILabel *variantLabel;
+@property (nonatomic, strong) NSLayoutConstraint *bubbleBottomConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *variantBottomConstraint;
 @property (nonatomic, weak) UITableView *hostTableView;
+@property (nonatomic, copy, nullable) void (^longPressHandler)(void);
+@property (nonatomic, copy, nullable) void (^variantStepHandler)(NSInteger delta);
 @end
 
 static const CGFloat kLumiPhotoCellHeight = 168.0;
@@ -136,6 +144,44 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         self.photoStack.hidden = YES;
         [self.bubble addSubview:self.photoStack];
 
+        self.variantBar = [[UIStackView alloc] init];
+        self.variantBar.translatesAutoresizingMaskIntoConstraints = NO;
+        self.variantBar.axis = UILayoutConstraintAxisHorizontal;
+        self.variantBar.spacing = 6.0;
+        self.variantBar.alignment = UIStackViewAlignmentCenter;
+        self.variantBar.hidden = YES;
+        [self.contentView addSubview:self.variantBar];
+
+        self.variantPrevButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [self.variantPrevButton setTitle:@"‹" forState:UIControlStateNormal];
+        self.variantPrevButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
+        [self.variantPrevButton setTitleColor:LumiAccentColor() forState:UIControlStateNormal];
+        [self.variantPrevButton addTarget:self action:@selector(variantPrevTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self.variantPrevButton.widthAnchor constraintEqualToConstant:26.0].active = YES;
+        [self.variantPrevButton.heightAnchor constraintEqualToConstant:26.0].active = YES;
+
+        self.variantLabel = [[UILabel alloc] init];
+        self.variantLabel.font = LumiFont(11.0, UIFontWeightMedium);
+        self.variantLabel.textColor = LumiMutedColor();
+        self.variantLabel.textAlignment = NSTextAlignmentCenter;
+
+        self.variantNextButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [self.variantNextButton setTitle:@"›" forState:UIControlStateNormal];
+        self.variantNextButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
+        [self.variantNextButton setTitleColor:LumiAccentColor() forState:UIControlStateNormal];
+        [self.variantNextButton addTarget:self action:@selector(variantNextTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self.variantNextButton.widthAnchor constraintEqualToConstant:26.0].active = YES;
+        [self.variantNextButton.heightAnchor constraintEqualToConstant:26.0].active = YES;
+
+        [self.variantBar addArrangedSubview:self.variantPrevButton];
+        [self.variantBar addArrangedSubview:self.variantLabel];
+        [self.variantBar addArrangedSubview:self.variantNextButton];
+
+        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:self action:@selector(handleLongPress:)];
+        longPress.minimumPressDuration = 0.45;
+        [self.contentView addGestureRecognizer:longPress];
+
         NSMutableArray *views = [NSMutableArray array];
         NSMutableArray *heights = [NSMutableArray array];
         for (NSUInteger index = 0; index < kLumiPhotosPerMessage; index++) {
@@ -152,10 +198,12 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         self.leadingConstraint = [self.bubble.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14.0];
         self.trailingConstraint = [self.bubble.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14.0];
         self.photoStackHeightConstraint = [self.photoStack.heightAnchor constraintEqualToConstant:0.0];
+        self.bubbleBottomConstraint = [self.bubble.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4.0];
+        self.variantBottomConstraint = [self.variantBar.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4.0];
+        self.variantBottomConstraint.active = NO;
 
         [NSLayoutConstraint activateConstraints:@[
             [self.bubble.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4.0],
-            [self.bubble.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4.0],
             [self.bubble.widthAnchor constraintLessThanOrEqualToAnchor:self.contentView.widthAnchor multiplier:0.82],
             [self.bubbleLabel.topAnchor constraintEqualToAnchor:self.bubble.topAnchor constant:10.0],
             [self.bubbleLabel.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:13.0],
@@ -166,6 +214,10 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
             [self.photoStack.trailingAnchor constraintEqualToAnchor:self.bubble.trailingAnchor constant:-8.0],
             [self.photoStack.bottomAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:-8.0],
             self.photoStackHeightConstraint,
+            self.bubbleBottomConstraint,
+
+            [self.variantBar.topAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:2.0],
+            [self.variantBar.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:2.0],
         ]];
     }
     return self;
@@ -183,6 +235,11 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
     }
     self.photoStack.hidden = YES;
     self.photoStackHeightConstraint.constant = 0.0;
+    self.variantBar.hidden = YES;
+    self.bubbleBottomConstraint.active = YES;
+    self.variantBottomConstraint.active = NO;
+    self.longPressHandler = nil;
+    self.variantStepHandler = nil;
 }
 
 - (void)updatePhotoStackHeight {
@@ -207,7 +264,9 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
 - (void)configureWithText:(NSString *)text
                    isUser:(BOOL)isUser
                   pending:(BOOL)pending
-                photoURLs:(NSArray<NSString *> *)photoURLs {
+                photoURLs:(NSArray<NSString *> *)photoURLs
+            variantsCount:(NSInteger)variantsCount
+              activeIndex:(NSInteger)activeIndex {
     UIColor *textColor = isUser ? [UIColor whiteColor] : LumiTextColor();
     UIFont *baseFont = LumiFont(15.0, UIFontWeightRegular);
     NSString *displayText = text.length ? text : (pending ? @"…" : @"");
@@ -284,6 +343,40 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         photo.photoURL = url;
     }
     [self updatePhotoStackHeight];
+
+    BOOL showVariants = !isUser && !pending && variantsCount > 1;
+    self.variantBar.hidden = !showVariants;
+    if (showVariants) {
+        NSInteger safeIndex = MAX(0, MIN(activeIndex, variantsCount - 1));
+        self.variantLabel.text = [NSString stringWithFormat:@"%ld/%ld",
+                                  (long)(safeIndex + 1), (long)variantsCount];
+        self.variantPrevButton.enabled = safeIndex > 0;
+        self.variantNextButton.enabled = safeIndex < variantsCount - 1;
+        self.variantPrevButton.alpha = safeIndex > 0 ? 1.0 : 0.3;
+        self.variantNextButton.alpha = safeIndex < variantsCount - 1 ? 1.0 : 0.3;
+    }
+    if (showVariants != !self.variantBottomConstraint.active) {
+        self.bubbleBottomConstraint.active = !showVariants;
+        self.variantBottomConstraint.active = showVariants;
+    }
+}
+
+- (void)variantPrevTapped {
+    if (self.variantStepHandler) {
+        self.variantStepHandler(-1);
+    }
+}
+
+- (void)variantNextTapped {
+    if (self.variantStepHandler) {
+        self.variantStepHandler(1);
+    }
+}
+
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan && self.longPressHandler) {
+        self.longPressHandler();
+    }
 }
 
 @end
@@ -344,6 +437,15 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 @property (nonatomic, strong) UIView *inputBar;
 @property (nonatomic, strong) UITextField *inputField;
 @property (nonatomic, strong) UIButton *sendButton;
+@property (nonatomic, strong) UIButton *photoButton;
+@property (nonatomic, strong) UIButton *sparksButton;
+@property (nonatomic, assign) NSInteger sparksBalance;
+@property (nonatomic, assign) BOOL sparksKnown;
+@property (nonatomic, copy, nullable) NSString *editingMessageID;
+@property (nonatomic, copy, nullable) NSString *editingOriginalContent;
+@property (nonatomic, assign) BOOL photoGenerating;
+@property (nonatomic, assign) BOOL regenerating;
+@property (nonatomic, strong, nullable) LumiChatStream *variantStream;
 @property (nonatomic, strong) NSLayoutConstraint *inputBottomConstraint;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) UILabel *stateLabel;
@@ -424,6 +526,25 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     [self.sendButton addTarget:self action:@selector(sendTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.inputBar addSubview:self.sendButton];
 
+    self.photoButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.photoButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.photoButton setTitle:@"📷" forState:UIControlStateNormal];
+    self.photoButton.titleLabel.font = [UIFont systemFontOfSize:19.0];
+    self.photoButton.backgroundColor = LumiElevatedColor();
+    self.photoButton.layer.cornerRadius = 17.0;
+    [self.photoButton addTarget:self action:@selector(photoTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.inputBar addSubview:self.photoButton];
+
+    self.sparksButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.sparksButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.sparksButton setTitle:@"⚡ —" forState:UIControlStateNormal];
+    self.sparksButton.titleLabel.font = LumiFont(12.0, UIFontWeightSemibold);
+    [self.sparksButton setTitleColor:LumiAccentColor() forState:UIControlStateNormal];
+    self.sparksButton.backgroundColor = LumiElevatedColor();
+    self.sparksButton.layer.cornerRadius = 14.0;
+    [self.sparksButton addTarget:self action:@selector(sparksTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.inputBar addSubview:self.sparksButton];
+
     self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
     self.spinner.translatesAutoresizingMaskIntoConstraints = NO;
     self.spinner.color = LumiAccentColor();
@@ -451,10 +572,20 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         self.inputBottomConstraint,
         [self.inputBar.heightAnchor constraintEqualToConstant:56.0],
 
-        [self.inputField.leadingAnchor constraintEqualToAnchor:self.inputBar.leadingAnchor constant:12.0],
+        [self.inputField.leadingAnchor constraintEqualToAnchor:self.sparksButton.trailingAnchor constant:6.0],
         [self.inputField.centerYAnchor constraintEqualToAnchor:self.inputBar.centerYAnchor],
         [self.inputField.heightAnchor constraintEqualToConstant:38.0],
-        [self.inputField.trailingAnchor constraintEqualToAnchor:self.sendButton.leadingAnchor constant:-8.0],
+        [self.inputField.trailingAnchor constraintEqualToAnchor:self.photoButton.leadingAnchor constant:-6.0],
+
+        [self.sparksButton.leadingAnchor constraintEqualToAnchor:self.inputBar.leadingAnchor constant:10.0],
+        [self.sparksButton.centerYAnchor constraintEqualToAnchor:self.inputBar.centerYAnchor],
+        [self.sparksButton.widthAnchor constraintEqualToConstant:52.0],
+        [self.sparksButton.heightAnchor constraintEqualToConstant:28.0],
+
+        [self.photoButton.trailingAnchor constraintEqualToAnchor:self.sendButton.leadingAnchor constant:-6.0],
+        [self.photoButton.centerYAnchor constraintEqualToAnchor:self.inputBar.centerYAnchor],
+        [self.photoButton.widthAnchor constraintEqualToConstant:34.0],
+        [self.photoButton.heightAnchor constraintEqualToConstant:34.0],
 
         [self.sendButton.trailingAnchor constraintEqualToAnchor:self.inputBar.trailingAnchor constant:-12.0],
         [self.sendButton.centerYAnchor constraintEqualToAnchor:self.inputBar.centerYAnchor],
@@ -481,11 +612,13 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     [LumiDiagnostics log:@"чат %@: открыт (%@), сообщений в списке: %lu",
      self.chatID, self.chatTitle ?: @"без названия", (unsigned long)self.messages.count];
     [self loadMessages];
+    [self refreshSparks];
 }
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self.stream cancel];
+    [self.variantStream cancel];
 }
 
 - (void)refreshNavigationTitle {
@@ -668,6 +801,34 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         result[@"created_at"] = createdAt;
     }
     NSArray<NSString *> *photos = LumiPhotoURLsInMessage(message, content);
+    NSArray *rawVariants = LumiAsArray(LumiValue(message, @"variants"));
+    NSMutableArray<NSString *> *variantContents = [NSMutableArray array];
+    for (id item in rawVariants) {
+        if ([item isKindOfClass:[NSString class]]) {
+            [variantContents addObject:item];
+            continue;
+        }
+        NSDictionary *dictionary = LumiAsDictionary(item);
+        NSString *variantContent = LumiStringValue(LumiValue(dictionary, @"content"));
+        if (variantContent.length) {
+            [variantContents addObject:variantContent];
+        }
+    }
+    NSInteger activeIndex = [LumiAsNumber(LumiValue(message, @"active_variant_index")) integerValue];
+    NSInteger variantsCount = [LumiAsNumber(LumiValue(message, @"variants_count")) integerValue];
+    if (variantContents.count) {
+        result[@"variants"] = variantContents;
+        result[@"active_variant_index"] = @(MAX(0, MIN(activeIndex, (NSInteger)variantContents.count - 1)));
+        result[@"variants_count"] = @(MAX(variantsCount, (NSInteger)variantContents.count));
+        if (!content.length) {
+            NSInteger safeIndex = MAX(0, MIN(activeIndex, (NSInteger)variantContents.count - 1));
+            result[@"content"] = variantContents[safeIndex];
+            photos = LumiPhotoURLsInMessage(@{}, variantContents[safeIndex]);
+        }
+    } else if (variantsCount > 1) {
+        result[@"variants_count"] = @(variantsCount);
+        result[@"active_variant_index"] = @(MAX(0, activeIndex));
+    }
     if (photos.count) {
         result[@"photo_urls"] = photos;
     }
@@ -732,6 +893,14 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
 - (void)sendCurrentText {
     NSString *text = [(self.inputField.text ?: @"") stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (self.editingMessageID.length) {
+        if (!text.length) {
+            [self exitEditMode];
+            return;
+        }
+        [self commitEditWithText:text];
+        return;
+    }
     if (!text.length || self.sending) {
         return;
     }
@@ -806,12 +975,15 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         }
         return;
     }
-    if ([type isEqualToString:@"done"] || [type isEqualToString:@"variant_done"]) {
+    if ([type isEqualToString:@"done"]) {
         NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (!normalized) {
             return;
         }
+        normalized[@"variants"] = @[LumiAsString(normalized[@"content"]) ?: @""];
+        normalized[@"active_variant_index"] = @0;
+        normalized[@"variants_count"] = @1;
         NSMutableDictionary *assistant = [self pendingAssistantMessage];
         if (assistant) {
             if (![LumiAsString(normalized[@"content"]) length] && [LumiAsString(assistant[@"content"]) length]) {
@@ -831,6 +1003,10 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         }
         [self reloadAllRows];
         [self scrollToBottomAnimated:YES];
+        return;
+    }
+    if ([type isEqualToString:@"variant_done"]) {
+        [self applyVariantPayload:payload fallbackMessageID:nil];
         return;
     }
     if ([type isEqualToString:@"error"]) {
@@ -935,6 +1111,421 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     [self scrollToBottomAnimated:YES];
 }
 
+#pragma mark - Sparks & photos
+
+static const NSInteger kLumiPhotoSparkCost = 10;
+
+- (void)refreshSparks {
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] fetchSparksWithCompletion:^(id result, NSError *error) {
+        if (error) {
+            [LumiDiagnostics log:@"искры: не загрузились — %@", error.localizedDescription];
+            return;
+        }
+        NSDictionary *dictionary = LumiAsDictionary(result);
+        NSNumber *balance = LumiAsNumber(LumiValue(dictionary, @"balance"))
+            ?: LumiAsNumber(LumiValue(dictionary, @"sparks_balance"))
+            ?: LumiAsNumber(LumiValue(dictionary, @"sparks"));
+        if (!balance) {
+            return;
+        }
+        weakSelf.sparksBalance = balance.integerValue;
+        weakSelf.sparksKnown = YES;
+        [weakSelf updateSparksButton];
+    }];
+}
+
+- (void)updateSparksButton {
+    NSString *title = self.sparksKnown
+        ? [NSString stringWithFormat:@"⚡ %ld", (long)self.sparksBalance]
+        : @"⚡ —";
+    [self.sparksButton setTitle:title forState:UIControlStateNormal];
+}
+
+- (void)sparksTapped {
+    [self refreshSparks];
+    NSString *message = nil;
+    if (!self.sparksKnown) {
+        message = @"Загружаю баланс искр…";
+    } else if (self.sparksBalance < kLumiPhotoSparkCost) {
+        message = [NSString stringWithFormat:@"Баланс: %ld искр.\n\nОдно фото стоит %ld искр — пока недостаточно. Бесплатных генераций не осталось.",
+                   (long)self.sparksBalance, (long)kLumiPhotoSparkCost];
+    } else {
+        NSInteger photos = self.sparksBalance / kLumiPhotoSparkCost;
+        message = [NSString stringWithFormat:@"Баланс: %ld искр.\n\nОдно фото стоит %ld искр — можно создать ещё %ld фото.",
+                   (long)self.sparksBalance, (long)kLumiPhotoSparkCost, (long)photos];
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Искры"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)photoTapped {
+    if (self.photoGenerating) {
+        return;
+    }
+    [self refreshSparks];
+    if (self.sparksKnown && self.sparksBalance < kLumiPhotoSparkCost) {
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Недостаточно искр"
+                             message:[NSString stringWithFormat:@"Для фото нужно %ld искр, на балансе %ld.",
+                                      (long)kLumiPhotoSparkCost, (long)self.sparksBalance]
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Сгенерировать фото"
+                                                                   message:[NSString stringWithFormat:@"%ld искр за фото", (long)kLumiPhotoSparkCost]
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Быстрая · 20–30 сек" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self generatePhotoWithQuality:@"standard"];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Детальная · 40–60 сек" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self generatePhotoWithQuality:@"enhanced"];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.photoButton;
+    sheet.popoverPresentationController.sourceRect = self.photoButton.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)generatePhotoWithQuality:(NSString *)quality {
+    if (self.photoGenerating || self.sending || !self.chatID.length) {
+        return;
+    }
+    self.photoGenerating = YES;
+    NSMutableDictionary *placeholder = [NSMutableDictionary dictionary];
+    placeholder[@"content"] = @"";
+    placeholder[@"is_user"] = @NO;
+    placeholder[@"pending"] = @YES;
+    placeholder[@"generating_photo"] = @YES;
+    [self.messages addObject:placeholder];
+    [self reloadAllRows];
+    [self scrollToBottomAnimated:YES];
+
+    [LumiDiagnostics log:@"чат %@: генерация фото (%@)", self.chatID, quality];
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] generateChatPhotoForChatID:self.chatID
+                                               quality:quality
+                                            completion:^(id result, NSError *error) {
+        weakSelf.photoGenerating = NO;
+        if (error) {
+            NSUInteger index = [weakSelf.messages indexOfObjectIdenticalTo:placeholder];
+            if (index != NSNotFound) {
+                [weakSelf.messages removeObjectAtIndex:index];
+            }
+            [weakSelf reloadAllRows];
+            [LumiDiagnostics log:@"чат %@: фото не создалось — %@", weakSelf.chatID, error.localizedDescription];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось создать фото"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [weakSelf presentViewController:alert animated:YES completion:nil];
+            [weakSelf refreshSparks];
+            return;
+        }
+        NSMutableDictionary *normalized = [weakSelf normalizedMessage:LumiAsDictionary(result)];
+        if (!normalized) {
+            normalized = [NSMutableDictionary dictionary];
+            normalized[@"content"] = @"";
+            normalized[@"is_user"] = @NO;
+        }
+        normalized[@"pending"] = @NO;
+        NSUInteger index = [weakSelf.messages indexOfObjectIdenticalTo:placeholder];
+        if (index != NSNotFound) {
+            [weakSelf.messages replaceObjectAtIndex:index withObject:normalized];
+        } else {
+            [weakSelf.messages addObject:normalized];
+        }
+        [weakSelf reloadAllRows];
+        [weakSelf scrollToBottomAnimated:YES];
+        [weakSelf refreshSparks];
+    }];
+}
+
+#pragma mark - Editing & variants
+
+- (NSUInteger)indexOfMessageWithID:(NSString *)messageID {
+    if (!messageID.length) {
+        return NSNotFound;
+    }
+    for (NSUInteger index = 0; index < self.messages.count; index++) {
+        if ([LumiStringValue(self.messages[index][@"id"]) isEqualToString:messageID]) {
+            return index;
+        }
+    }
+    return NSNotFound;
+}
+
+- (void)presentMessageMenuForRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)self.messages.count) {
+        return;
+    }
+    NSDictionary *message = self.messages[row];
+    NSString *messageID = LumiStringValue(message[@"id"]);
+    BOOL isUser = [message[@"is_user"] boolValue];
+    BOOL pending = [message[@"pending"] boolValue];
+    NSString *content = LumiStringValue(message[@"content"]) ?: @"";
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    if (messageID.length && !pending) {
+        [sheet addAction:[UIAlertAction actionWithTitle:(isUser ? @"Редактировать сообщение" : @"Редактировать ответ")
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [weakSelf beginEditingMessageWithID:messageID];
+        }]];
+    }
+    if (!isUser && messageID.length && !pending && !self.regenerating) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Перегенерировать"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [weakSelf regenerateMessageWithID:messageID];
+        }]];
+    }
+    if (content.length) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Копировать"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [UIPasteboard generalPasteboard].string = content;
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds),
+                                                                CGRectGetMaxY(self.view.bounds) - 80.0,
+                                                                1.0, 1.0);
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)beginEditingMessageWithID:(NSString *)messageID {
+    NSUInteger index = [self indexOfMessageWithID:messageID];
+    if (index == NSNotFound) {
+        return;
+    }
+    NSMutableDictionary *message = self.messages[index];
+    NSString *content = LumiStringValue(message[@"content"]) ?: @"";
+    self.editingMessageID = messageID;
+    self.editingOriginalContent = content;
+    self.inputField.text = content;
+    self.inputField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Редактирование…"
+                                                                           attributes:@{NSForegroundColorAttributeName: LumiMutedColor()}];
+    [self.sendButton setTitle:@"✓" forState:UIControlStateNormal];
+    [self.inputField becomeFirstResponder];
+}
+
+- (void)exitEditMode {
+    self.editingMessageID = nil;
+    self.editingOriginalContent = nil;
+    self.inputField.text = @"";
+    self.inputField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Сообщение…"
+                                                                           attributes:@{NSForegroundColorAttributeName: LumiMutedColor()}];
+    [self.sendButton setTitle:@"→" forState:UIControlStateNormal];
+}
+
+- (void)commitEditWithText:(NSString *)text {
+    NSString *messageID = self.editingMessageID;
+    NSUInteger index = [self indexOfMessageWithID:messageID];
+    if (index == NSNotFound) {
+        [self exitEditMode];
+        return;
+    }
+    NSMutableDictionary *message = self.messages[index];
+    NSString *original = LumiStringValue(message[@"content"]) ?: @"";
+    [self exitEditMode];
+    if ([original isEqualToString:text] || self.sending) {
+        return;
+    }
+
+    [self applyEditedContent:text toMessage:message];
+    [self reloadAllRows];
+    self.sending = YES;
+    self.sendButton.enabled = NO;
+    self.sendButton.alpha = 0.5;
+
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] editMessageWithID:messageID
+                                       chatID:self.chatID
+                                      content:text
+                                   completion:^(id result, NSError *error) {
+        weakSelf.sending = NO;
+        weakSelf.sendButton.enabled = YES;
+        weakSelf.sendButton.alpha = 1.0;
+        if (error) {
+            [weakSelf applyEditedContent:original toMessage:message];
+            [weakSelf reloadAllRows];
+            [LumiDiagnostics log:@"чат %@: правка не сохранилась — %@", weakSelf.chatID, error.localizedDescription];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось сохранить"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [weakSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        NSMutableDictionary *normalized = [weakSelf normalizedMessage:LumiAsDictionary(result)];
+        if (normalized) {
+            if (!LumiStringValue(normalized[@"id"]).length) {
+                normalized[@"id"] = messageID;
+            }
+            normalized[@"is_user"] = message[@"is_user"];
+            normalized[@"pending"] = @NO;
+            NSUInteger currentIndex = [weakSelf indexOfMessageWithID:messageID];
+            if (currentIndex != NSNotFound) {
+                [weakSelf.messages replaceObjectAtIndex:currentIndex withObject:normalized];
+                [weakSelf reloadAllRows];
+            }
+        }
+    }];
+}
+
+- (void)applyEditedContent:(NSString *)text toMessage:(NSMutableDictionary *)message {
+    if (!message) {
+        return;
+    }
+    message[@"content"] = text ?: @"";
+    NSArray *existingVariants = LumiAsArray(message[@"variants"]);
+    if (existingVariants.count) {
+        NSMutableArray *variants = [existingVariants mutableCopy];
+        NSInteger active = [LumiAsNumber(message[@"active_variant_index"]) integerValue];
+        active = MAX(0, MIN(active, (NSInteger)variants.count - 1));
+        variants[active] = text ?: @"";
+        message[@"variants"] = variants;
+        message[@"active_variant_index"] = @(active);
+    }
+    NSArray *photos = LumiPhotoURLsInMessage(@{}, text ?: @"");
+    message[@"photo_urls"] = photos.count ? photos : nil;
+    message[@"pending"] = @NO;
+}
+
+- (void)regenerateMessageWithID:(NSString *)messageID {
+    if (self.regenerating || self.sending || !messageID.length || !self.chatID.length) {
+        return;
+    }
+    self.regenerating = YES;
+    self.stateLabel.text = @"Генерирую новый вариант…";
+    [self.spinner startAnimating];
+
+    [LumiDiagnostics log:@"чат %@: перегенерация %@", self.chatID, messageID];
+    __weak typeof(self) weakSelf = self;
+    self.variantStream = [[LumiAPI sharedClient] regenerateMessageWithID:messageID
+                                                                 chatID:self.chatID
+                                                           eventHandler:^(NSString *type, NSDictionary *payload) {
+        if ([type isEqualToString:@"variant_done"]) {
+            [weakSelf applyVariantPayload:payload fallbackMessageID:messageID];
+        } else if ([type isEqualToString:@"error"]) {
+            NSString *message = LumiStringValue(LumiValue(payload, @"error"))
+                ?: LumiStringValue(LumiValue(payload, @"message"))
+                ?: @"Не удалось перегенерировать";
+            [LumiDiagnostics log:@"чат %@: перегенерация отклонена — %@", weakSelf.chatID, message];
+        }
+    } completion:^(NSError *error) {
+        weakSelf.regenerating = NO;
+        weakSelf.variantStream = nil;
+        [weakSelf.spinner stopAnimating];
+        if (weakSelf.messages.count) {
+            weakSelf.stateLabel.text = nil;
+        }
+        if (error) {
+            [LumiDiagnostics log:@"чат %@: перегенерация не удалась — %@", weakSelf.chatID, error.localizedDescription];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось перегенерировать"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [weakSelf presentViewController:alert animated:YES completion:nil];
+        }
+    }];
+}
+
+- (void)applyVariantPayload:(NSDictionary *)payload fallbackMessageID:(NSString *)fallbackID {
+    NSString *messageID = LumiStringValue(LumiValue(payload, @"message_id")) ?: fallbackID;
+    NSUInteger index = [self indexOfMessageWithID:messageID];
+    if (index == NSNotFound) {
+        return;
+    }
+    NSString *content = LumiStringValue(LumiValue(payload, @"content")) ?: @"";
+    if (!content.length) {
+        return;
+    }
+    NSInteger variantIndex = [LumiAsNumber(LumiValue(payload, @"variant_index")) integerValue];
+    NSInteger variantsCount = [LumiAsNumber(LumiValue(payload, @"variants_count")) integerValue];
+    variantIndex = MAX(0, variantIndex);
+
+    NSMutableDictionary *message = self.messages[index];
+    NSMutableArray *variants = [LumiAsArray(message[@"variants"]) mutableCopy];
+    if (!variants) {
+        variants = [NSMutableArray array];
+        NSString *existing = LumiStringValue(message[@"content"]);
+        if (existing.length) {
+            [variants addObject:existing];
+        }
+    }
+    while ((NSInteger)variants.count <= variantIndex) {
+        [variants addObject:content];
+    }
+    variants[variantIndex] = content;
+    message[@"variants"] = variants;
+    message[@"content"] = content;
+    message[@"active_variant_index"] = @(variantIndex);
+    message[@"variants_count"] = @(MAX(variantsCount, (NSInteger)variants.count));
+    NSArray *photos = LumiPhotoURLsInMessage(@{}, content);
+    message[@"photo_urls"] = photos.count ? photos : nil;
+    message[@"pending"] = @NO;
+    [self reloadAllRows];
+    [self scrollToBottomAnimated:YES];
+}
+
+- (void)stepVariantForRow:(NSInteger)row delta:(NSInteger)delta {
+    if (row < 0 || row >= (NSInteger)self.messages.count) {
+        return;
+    }
+    NSMutableDictionary *message = self.messages[row];
+    NSArray *variants = LumiAsArray(message[@"variants"]);
+    if (variants.count < 2) {
+        return;
+    }
+    NSString *messageID = LumiStringValue(message[@"id"]);
+    if (!messageID.length) {
+        return;
+    }
+    NSInteger current = [LumiAsNumber(message[@"active_variant_index"]) integerValue];
+    NSInteger next = MAX(0, MIN(current + delta, (NSInteger)variants.count - 1));
+    if (next == current) {
+        return;
+    }
+    message[@"active_variant_index"] = @(next);
+    message[@"content"] = variants[next];
+    NSArray *photos = LumiPhotoURLsInMessage(@{}, variants[next]);
+    message[@"photo_urls"] = photos.count ? photos : nil;
+    [self reloadAllRows];
+
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] setActiveVariantIndex:next
+                                     forMessageID:messageID
+                                           chatID:self.chatID
+                                       completion:^(id result, NSError *error) {
+        if (!error) {
+            return;
+        }
+        [LumiDiagnostics log:@"чат %@: вариант не переключился — %@", weakSelf.chatID, error.localizedDescription];
+        NSUInteger index = [weakSelf indexOfMessageWithID:messageID];
+        if (index == NSNotFound) {
+            return;
+        }
+        NSMutableDictionary *currentMessage = weakSelf.messages[index];
+        currentMessage[@"active_variant_index"] = @(current);
+        currentMessage[@"content"] = variants[current];
+        NSArray *currentPhotos = LumiPhotoURLsInMessage(@{}, variants[current]);
+        currentMessage[@"photo_urls"] = currentPhotos.count ? currentPhotos : nil;
+        [weakSelf reloadAllRows];
+    }];
+}
+
 #pragma mark - Keyboard
 
 - (void)keyboardWillChange:(NSNotification *)notification {
@@ -968,16 +1559,37 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     LumiMessageCell *cell = [tableView dequeueReusableCellWithIdentifier:@"message" forIndexPath:indexPath];
     cell.hostTableView = tableView;
     if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.messages.count) {
-        [cell configureWithText:@"" isUser:NO pending:NO photoURLs:@[]];
+        [cell configureWithText:@""
+                         isUser:NO
+                        pending:NO
+                      photoURLs:@[]
+                  variantsCount:1
+                    activeIndex:0];
         return cell;
     }
     NSDictionary *message = self.messages[indexPath.row];
     BOOL isUser = [message[@"is_user"] boolValue];
     BOOL pending = [message[@"pending"] boolValue];
+    NSArray *variants = LumiAsArray(message[@"variants"]);
+    NSInteger variantsCount = MAX(1, [LumiAsNumber(message[@"variants_count"]) integerValue]);
+    if (variants.count > 0) {
+        variantsCount = MAX(variantsCount, (NSInteger)variants.count);
+    }
+    NSInteger activeIndex = [LumiAsNumber(message[@"active_variant_index"]) integerValue];
     [cell configureWithText:LumiStringValue(message[@"content"])
                      isUser:isUser
                     pending:pending
-                  photoURLs:LumiAsArray(message[@"photo_urls"]) ?: @[]];
+                  photoURLs:LumiAsArray(message[@"photo_urls"]) ?: @[]
+              variantsCount:variantsCount
+                activeIndex:activeIndex];
+    __weak typeof(self) weakSelf = self;
+    NSInteger row = indexPath.row;
+    cell.longPressHandler = ^{
+        [weakSelf presentMessageMenuForRow:row];
+    };
+    cell.variantStepHandler = ^(NSInteger delta) {
+        [weakSelf stepVariantForRow:row delta:delta];
+    };
     return cell;
 }
 
