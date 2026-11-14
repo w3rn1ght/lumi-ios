@@ -48,7 +48,8 @@
         navigation.navigationBar.prefersLargeTitles = NO;
     }
     controller.title = title;
-    controller.tabBarItem = [[UITabBarItem alloc] initWithTitle:title image:nil selectedImage:nil];
+    controller.tabBarItem = [[UITabBarItem alloc] initWithTitle:nil image:nil selectedImage:nil];
+    controller.tabBarItem.imageInsets = UIEdgeInsetsMake(6, 0, -6, 0);
     return navigation;
 }
 

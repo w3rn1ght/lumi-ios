@@ -53,6 +53,17 @@ extern NSString *const LumiAuthDidChangeNotification;
 
 #pragma mark - Catalog
 
+/// Cursor-paged catalog endpoints returning full card data (name, cover, tags, message_count, etc.).
+/// Endpoint: GET /characters?scope=all&fields=card&limit=100&sort=popular&cursor=...
+- (void)fetchCharacterCardsWithCursor:(nullable NSString *)cursor
+                         completion:(LumiAPICompletion)completion;
+
+/// Cursor-paged catalog endpoints returning full card data.
+/// Endpoint: GET /stories?scope=all&fields=card&limit=100&sort=popular&cursor=...
+- (void)fetchStoryCardsWithCursor:(nullable NSString *)cursor
+                     completion:(LumiAPICompletion)completion;
+
+/// Legacy ID-list + detail endpoints (kept for compatibility).
 - (void)fetchCharacterIDsWithCompletion:(LumiAPICompletion)completion;
 - (void)fetchCharacterWithID:(NSString *)characterID completion:(LumiAPICompletion)completion;
 - (void)fetchStoryIDsWithCompletion:(LumiAPICompletion)completion;

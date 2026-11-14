@@ -123,7 +123,7 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     if (!name.length) {
         name = LumiChatKind(chat) && [LumiChatKind(chat) isEqualToString:@"story"] ? @"История" : @"Персонаж";
     }
-    self.titleLabel.text = [NSString stringWithFormat:@"%@  ·  чат №%lu", name, (unsigned long)number];
+    self.titleLabel.text = name;
 
     NSString *preview = [self previewFromChat:chat];
     self.subtitleLabel.text = preview.length ? preview : @"Нет сообщений";

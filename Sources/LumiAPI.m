@@ -56,6 +56,12 @@ static BOOL LumiIsSessionCookie(NSHTTPCookie *cookie) {
            [cookie.name isEqualToString:@"lumi_refresh_token"];
 }
 
+static NSString *LumiEncodeQueryValue(NSString *value) {
+    NSCharacterSet *allowed = [NSCharacterSet alphanumericCharacterSet];
+    allowed = [allowed characterSetByAddingCharactersInString:@"-_.~"];
+    return [value stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: value;
+}
+
 #pragma mark - Secure store
 
 @implementation LumiSecureStore
@@ -496,6 +502,30 @@ static NSString *LumiEncodePath(NSString *path) {
             completion(nil, retryError ?: LumiError(500, @"Не удалось загрузить каталог"));
         }];
     }];
+}
+
+- (void)fetchCharacterCardsWithCursor:(NSString *)cursor
+                         completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/characters?scope=all&fields=card&limit=100&sort=popular%@",
+                      cursor ? [NSString stringWithFormat:@"&cursor=%@", [self class] LumiEncodeQueryValue:cursor] : @""];
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:40.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)fetchStoryCardsWithCursor:(NSString *)cursor
+                     completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/stories?scope=all&fields=card&limit=100&sort=popular%@",
+                      cursor ? [NSString stringWithFormat:@"&cursor=%@", [self class] LumiEncodeQueryValue:cursor] : @""];
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:40.0];
+    [self performRequest:request completion:completion];
 }
 
 - (void)fetchCharacterWithID:(NSString *)characterID completion:(LumiAPICompletion)completion {

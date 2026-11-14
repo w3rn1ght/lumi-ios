@@ -346,7 +346,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.pendingCharacterRetry = NO;
     [self startSyncWithPhase:@"Подготовка"];
     [self syncTags];
-    [self syncCharacterIDs];
+    [self syncCharactersWithCursor];
 }
 
 - (void)syncTags {
@@ -506,128 +506,126 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     [self syncStoryIDs];
 }
 
-- (void)syncCharacterIDs {
-    [self.api fetchCharacterIDsWithCompletion:^(id result, NSError *error) {
-        if (![result isKindOfClass:[NSArray class]]) {
-            [self failSyncWithError:error fallback:@"Не удалось загрузить список персонажей"];
-            return;
-        }
-        NSArray<NSString *> *ids = [self identifiersFromItems:result];
-        self.totalCharacterCount = ids.count;
-        NSMutableDictionary *known = [NSMutableDictionary dictionary];
-        for (NSDictionary *character in self.characters) {
-            id identifier = character[@"id"];
-            if ([identifier isKindOfClass:[NSString class]] && character[@"name"]) {
-                known[identifier] = character;
-            }
-        }
-        NSMutableArray<NSString *> *missing = [NSMutableArray array];
-        NSMutableArray *merged = [NSMutableArray array];
-        for (NSString *identifier in ids) {
-            if (known[identifier]) {
-                [merged addObject:known[identifier]];
-            } else {
-                [missing addObject:identifier];
-            }
-        }
-        if (merged.count) {
-            self.characters = [self sortedCharacters:merged];
-        }
-        self.syncedCharacterCount = known.count;
-        [self updateProgressWithPhase:@"Персонажи" phaseDone:known.count phaseTotal:ids.count];
-        [self recalculateProgress];
-        [self notifyUpdate];
-        NSLog(@"[Lumi] catalog: %lu ids, %lu missing details", (unsigned long)ids.count, (unsigned long)missing.count);
-        [LumiDiagnostics log:@"каталог: %lu персонажей, загрузить %lu",
-         (unsigned long)ids.count, (unsigned long)missing.count];
+- (void)syncCharactersWithCursor {
+    [self updateProgressWithPhase:@"Персонажи" phaseDone:0 phaseTotal:0];
+    [self recalculateProgress];
+    [self notifyUpdate];
 
-        if (!missing.count) {
-            [self syncStoryIDs];
+    NSMutableArray *allCharacters = [NSMutableArray array];
+    __weak typeof(self) weakSelf = self;
+
+    void (^fetchPage)(NSString * _Nullable) = ^(NSString * _Nullable cursor) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
             return;
         }
-        __weak typeof(self) weakSelf = self;
-        [self syncDetailsForIDs:missing
-                           kind:LumiCatalogSyncKindCharacter
-                    alreadyDone:known.count
-                   overallTotal:ids.count
-                     completion:^(NSUInteger failed) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) {
+
+        [strongSelf.api fetchCharacterCardsWithCursor:cursor completion:^(id result, NSError *error) {
+            __strong typeof(weakSelf) strongSelf2 = weakSelf;
+            if (!strongSelf2) {
                 return;
             }
-            [strongSelf handleCharacterSyncCompletionWithFailed:failed
-                                                        missing:missing
-                                                     overallIDs:ids];
+
+            if (error) {
+                [strongSelf2 failSyncWithError:error fallback:@"Не удалось загрузить персонажей"];
+                return;
+            }
+
+            NSArray *items = nil;
+            NSString *nextCursor = nil;
+            if ([result isKindOfClass:[NSDictionary class]]) {
+                items = result[@"items"];
+                nextCursor = result[@"next_cursor"];
+            } else if ([result isKindOfClass:[NSArray class]]) {
+                items = result;
+            }
+
+            if ([items isKindOfClass:[NSArray class]] && items.count > 0) {
+                [allCharacters addObjectsFromArray:items];
+                [strongSelf2 updateProgressWithPhase:@"Персонажи" phaseDone:allCharacters.count phaseTotal:0];
+                [strongSelf2 recalculateProgress];
+                [strongSelf2 notifyUpdate];
+            }
+
+            if (nextCursor && [nextCursor isKindOfClass:[NSString class]] && nextCursor.length > 0) {
+                fetchPage(nextCursor);
+            } else {
+                // All pages fetched, finalize characters
+                strongSelf2.characters = [strongSelf2 sortedCharacters:allCharacters];
+                strongSelf2.totalCharacterCount = allCharacters.count;
+                strongSelf2.syncedCharacterCount = allCharacters.count;
+                [strongSelf2 updateProgressWithPhase:@"Персонажи" phaseDone:allCharacters.count phaseTotal:allCharacters.count];
+                [strongSelf2 recalculateProgress];
+                [strongSelf2 notifyUpdate];
+                NSLog(@"[Lumi] catalog: %lu characters loaded via cursor pagination", (unsigned long)allCharacters.count);
+                [LumiDiagnostics log:@"каталог: загружено %lu персонажей", (unsigned long)allCharacters.count];
+                [strongSelf2 syncStoriesWithCursor];
+            }
         }];
-    }];
+    };
+
+    fetchPage(nil);
 }
 
-- (void)syncStoryIDs {
+- (void)syncStoriesWithCursor {
     [self updateProgressWithPhase:@"Истории" phaseDone:0 phaseTotal:0];
     [self recalculateProgress];
     [self notifyUpdate];
-    [self.api fetchStoryIDsWithCompletion:^(id result, NSError *error) {
-        if (![result isKindOfClass:[NSArray class]]) {
-            self.isSyncing = NO;
-            self.syncPhase = nil;
-            self.syncStatus = nil;
-            [self saveCache];
-            [self notifyUpdate];
-            return;
-        }
-        NSArray<NSString *> *ids = [self identifiersFromItems:result];
-        NSMutableDictionary *known = [NSMutableDictionary dictionary];
-        for (NSDictionary *story in self.stories) {
-            id identifier = story[@"id"];
-            if ([identifier isKindOfClass:[NSString class]] && story[@"title"]) {
-                known[identifier] = story;
-            }
-        }
-        NSMutableArray<NSString *> *missing = [NSMutableArray array];
-        NSMutableArray *merged = [NSMutableArray array];
-        for (NSString *identifier in ids) {
-            if (known[identifier]) {
-                [merged addObject:known[identifier]];
-            } else {
-                [missing addObject:identifier];
-            }
-        }
-        self.stories = [self sortedStories:merged];
-        self.totalStoryCount = ids.count;
-        self.syncedStoryCount = known.count;
-        [self updateProgressWithPhase:@"Истории" phaseDone:known.count phaseTotal:ids.count];
-        [self recalculateProgress];
-        [self notifyUpdate];
 
-        if (!missing.count) {
-            [self finishSync];
+    NSMutableArray *allStories = [NSMutableArray array];
+    __weak typeof(self) weakSelf = self;
+
+    void (^fetchPage)(NSString * _Nullable) = ^(NSString * _Nullable cursor) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
             return;
         }
-        __weak typeof(self) weakSelf = self;
-        [self syncDetailsForIDs:missing
-                           kind:LumiCatalogSyncKindStory
-                    alreadyDone:known.count
-                   overallTotal:ids.count
-                     completion:^(NSUInteger failed) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) {
+
+        [strongSelf.api fetchStoryCardsWithCursor:cursor completion:^(id result, NSError *error) {
+            __strong typeof(weakSelf) strongSelf2 = weakSelf;
+            if (!strongSelf2) {
                 return;
             }
-            strongSelf.syncedStoryCount = ids.count;
-            [strongSelf updateProgressWithPhase:@"Истории" phaseDone:ids.count phaseTotal:ids.count];
-            [strongSelf recalculateProgress];
-            [strongSelf saveCache];
-            if (failed > 0) {
-                [LumiDiagnostics log:@"каталог: не загрузилось %lu историй из %lu",
-                 (unsigned long)failed, (unsigned long)missing.count];
-            }
-            if (missing.count > 0 && failed == missing.count) {
-                [strongSelf failSyncWithError:nil fallback:@"Не удалось загрузить истории. Проверьте соединение."];
+
+            if (error) {
+                [strongSelf2 failSyncWithError:error fallback:@"Не удалось загрузить истории"];
                 return;
             }
-            [strongSelf finishSync];
+
+            NSArray *items = nil;
+            NSString *nextCursor = nil;
+            if ([result isKindOfClass:[NSDictionary class]]) {
+                items = result[@"items"];
+                nextCursor = result[@"next_cursor"];
+            } else if ([result isKindOfClass:[NSArray class]]) {
+                items = result;
+            }
+
+            if ([items isKindOfClass:[NSArray class]] && items.count > 0) {
+                [allStories addObjectsFromArray:items];
+                [strongSelf2 updateProgressWithPhase:@"Истории" phaseDone:allStories.count phaseTotal:0];
+                [strongSelf2 recalculateProgress];
+                [strongSelf2 notifyUpdate];
+            }
+
+            if (nextCursor && [nextCursor isKindOfClass:[NSString class]] && nextCursor.length > 0) {
+                fetchPage(nextCursor);
+            } else {
+                // All pages fetched, finalize stories
+                strongSelf2.stories = [strongSelf2 sortedStories:allStories];
+                strongSelf2.totalStoryCount = allStories.count;
+                strongSelf2.syncedStoryCount = allStories.count;
+                [strongSelf2 updateProgressWithPhase:@"Истории" phaseDone:allStories.count phaseTotal:allStories.count];
+                [strongSelf2 recalculateProgress];
+                [strongSelf2 saveCache];
+                NSLog(@"[Lumi] catalog: %lu stories loaded via cursor pagination", (unsigned long)allStories.count);
+                [LumiDiagnostics log:@"каталог: загружено %lu историй", (unsigned long)allStories.count];
+                [strongSelf2 finishSync];
+            }
         }];
-    }];
+    };
+
+    fetchPage(nil);
 }
 
 - (void)finishSync {
