@@ -520,7 +520,6 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         if (!strongSelf) {
             return;
         }
-        __weak typeof(fetchPage) weakFetchPage = fetchPage;
 
         [strongSelf.api fetchCharacterCardsWithCursor:cursor completion:^(id result, NSError *error) {
             __strong typeof(weakSelf) strongSelf2 = weakSelf;
@@ -550,7 +549,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
 
             if (nextCursor && [nextCursor isKindOfClass:[NSString class]] && nextCursor.length > 0) {
-                weakFetchPage(nextCursor);
+                fetchPage(nextCursor);
             } else {
                 // All pages fetched, finalize characters
                 strongSelf2.characters = [strongSelf2 sortedCharacters:allCharacters];
@@ -583,7 +582,6 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         if (!strongSelf) {
             return;
         }
-        __weak typeof(fetchPage) weakFetchPage = fetchPage;
 
         [strongSelf.api fetchStoryCardsWithCursor:cursor completion:^(id result, NSError *error) {
             __strong typeof(weakSelf) strongSelf2 = weakSelf;
@@ -613,7 +611,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
 
             if (nextCursor && [nextCursor isKindOfClass:[NSString class]] && nextCursor.length > 0) {
-                weakFetchPage(nextCursor);
+                fetchPage(nextCursor);
             } else {
                 // All pages fetched, finalize stories
                 strongSelf2.stories = [strongSelf2 sortedStories:allStories];
