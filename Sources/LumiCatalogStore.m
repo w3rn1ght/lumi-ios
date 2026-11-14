@@ -553,7 +553,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     __weak typeof(self) weakSelf = self;
     
     __block void (^fetchPage)(void);
-    __weak typeof(fetchPage) *weakFetchPage = &fetchPage;
+    __weak void (^weakFetchPage)(void) = fetchPage;
     fetchPage = ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
@@ -592,7 +592,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                     [weakSelf updateProgressWithPhase:kind phaseDone:allCards.count phaseTotal:0];
                     [weakSelf notifyUpdate];
                 });
-                void (^strongFetchPage)(void) = *weakFetchPage;
+                void (^strongFetchPage)(void) = weakFetchPage;
                 if (strongFetchPage) strongFetchPage();
             } else {
                 completion([allCards copy], nil);
@@ -608,6 +608,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         }
     };
     
+    weakFetchPage = fetchPage;
     fetchPage();
 }
 
