@@ -57,9 +57,10 @@ static BOOL LumiIsSessionCookie(NSHTTPCookie *cookie) {
 }
 
 static NSString *LumiEncodeQueryValue(NSString *value) {
-    NSMutableCharacterSet *allowed = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
-    [allowed addCharactersInString:@"-_.~"];
-    return [value stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: value;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
+    NSString *encoded = [value stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+    return encoded ?: value;
 }
 
 #pragma mark - Secure store
@@ -105,6 +106,16 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
     [defaults synchronize];
 }
 
++ (void)clearSession {
+    NSUserDefaults *defaults = [self defaults];
+    [defaults removeObjectForKey:kTokenKey];
+    [defaults removeObjectForKey:kRefreshKey];
+    [defaults removeObjectForKey:kSessionMarkerKey];
+    [defaults removeObjectForKey:kUserCacheKey];
+    [defaults synchronize];
+    [[NSHTTPCookieStorage sharedHTTPCookieStorage] removeCookiesSinceDate:[NSDate distantPast]];
+}
+
 @end
 
 #pragma mark - URL encoding
@@ -114,15 +125,6 @@ static NSString *LumiEncodePathComponent(NSString *path) {
         @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/?&=+,:%"];
     NSString *encoded = [path stringByAddingPercentEncodingWithAllowedCharacters:allowed];
     return encoded ?: path;
-}
-
-/// Cursors are opaque base64 strings, so every reserved character must be
-/// escaped before it is embedded into a query string.
-static NSString *LumiEncodeQueryValue(NSString *value) {
-    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
-        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
-    NSString *encoded = [value stringByAddingPercentEncodingWithAllowedCharacters:allowed];
-    return encoded ?: value;
 }
 
 #pragma mark - API client
@@ -198,15 +200,16 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
                                                          cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                      timeoutInterval:timeout];
     request.HTTPMethod = method;
-    request.allHTTPHeaderFields = @{
+    NSMutableDictionary *headers = [@{
         @"Accept": @"application/json",
         @"Content-Type": @"application/json",
-        @"User-Agent": @"Lumi-iOS/1.5.2",
+        @"User-Agent": @"Lumi-iOS/1.5.3",
         @"Origin": kWebOrigin,
-    };
+    } mutableCopy];
     if (self.accessToken.length) {
-        request.allHTTPHeaderFields[@"Authorization"] = [NSString stringWithFormat:@"Bearer %@", self.accessToken];
+        headers[@"Authorization"] = [NSString stringWithFormat:@"Bearer %@", self.accessToken];
     }
+    request.allHTTPHeaderFields = headers;
     if (body) {
         NSError *jsonError = nil;
         request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:&jsonError];
@@ -305,11 +308,10 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
                                                       body:nil
                                                    timeout:20.0];
     [self performRequest:request completion:^(id result, NSError *error) {
-        [LumiSecureStore markSessionActive:NO];
+        [LumiSecureStore clearSession];
         self.currentUser = nil;
         self.accessToken = nil;
         self.refreshToken = nil;
-        [[NSHTTPCookieStorage sharedHTTPCookieStorage] removeCookiesSinceDate:[NSDate distantPast]];
         completion();
     }];
 }
@@ -319,7 +321,7 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
 }
 
 - (void)setCurrentUserJSON:(NSDictionary *)user {
-    self.currentUser = [[LumiSessionUser alloc] initWithDictionary:user];
+    self.currentUser = [LumiSessionUser userFromJSON:user];
     [LumiSecureStore markSessionActive:YES];
 }
 
@@ -352,6 +354,34 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
 - (void)fetchStoryCardsWithCursor:(NSString *)cursor
                    completion:(LumiAPICompletion)completion {
     NSString *path = [NSString stringWithFormat:@"/stories?scope=all&fields=card&limit=100&sort=popular%@",
+                      cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:40.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)fetchCharacterCardsWithCursor:(NSString *)cursor
+                               limit:(NSInteger)limit
+                      completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/characters?scope=all&fields=card&limit=%ld&sort=popular%@",
+                      (long)limit,
+                      cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:40.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)fetchStoryCardsWithCursor:(NSString *)cursor
+                           limit:(NSInteger)limit
+                      completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/stories?scope=all&fields=card&limit=%ld&sort=popular%@",
+                      (long)limit,
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                       path:path
@@ -398,7 +428,7 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
                     return;
                 }
                 completion(nil, retryError ?: error);
-            });
+            }];
             return;
         }
         completion(nil, error);
@@ -420,10 +450,10 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
     NSMutableArray *params = [NSMutableArray array];
     if (query.length) [params addObject:[NSString stringWithFormat:@"q=%@", LumiEncodeQueryValue(query)]];
     if (tag.length && ![tag isEqualToString:@"Все"]) [params addObject:[NSString stringWithFormat:@"tag=%@", LumiEncodeQueryValue(tag)]];
-    params addObject:@"scope=all";
-    params addObject:@"fields=card";
-    params addObject:@"limit=100";
-    params addObject:@"sort=popular";
+    [params addObject:@"scope=all"];
+    [params addObject:@"fields=card"];
+    [params addObject:@"limit=100"];
+    [params addObject:@"sort=popular"];
     NSString *path = [NSString stringWithFormat:@"/characters?%@", [params componentsJoinedByString:@"&"]];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                       path:path
@@ -439,10 +469,10 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
     NSMutableArray *params = [NSMutableArray array];
     if (query.length) [params addObject:[NSString stringWithFormat:@"q=%@", LumiEncodeQueryValue(query)]];
     if (tag.length && ![tag isEqualToString:@"Все"]) [params addObject:[NSString stringWithFormat:@"tag=%@", LumiEncodeQueryValue(tag)]];
-    params addObject:@"scope=all";
-    params addObject:@"fields=card";
-    params addObject:@"limit=100";
-    params addObject:@"sort=popular";
+    [params addObject:@"scope=all"];
+    [params addObject:@"fields=card"];
+    [params addObject:@"limit=100"];
+    [params addObject:@"sort=popular"];
     NSString *path = [NSString stringWithFormat:@"/stories?%@", [params componentsJoinedByString:@"&"]];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                       path:path
@@ -545,6 +575,25 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
                                                     eventHandler:eventHandler
                                                       completion:completion];
     [stream open];
+}
+
+@end
+
+#pragma mark - LumiSessionUser implementation
+
+@implementation LumiSessionUser
+
++ (instancetype)userFromJSON:(NSDictionary *)json {
+    LumiSessionUser *user = [[LumiSessionUser alloc] init];
+    user.userID = [json[@"id"] isKindOfClass:[NSString class]] ? json[@"id"] : [json[@"id"] stringValue];
+    user.email = json[@"email"];
+    user.username = json[@"username"];
+    user.avatarURL = json[@"avatar_url"];
+    return user;
+}
+
+- (NSString *)displayName {
+    return self.username ?: self.email ?: self.userID ?: @"Unknown";
 }
 
 @end
