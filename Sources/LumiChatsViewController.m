@@ -255,6 +255,7 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 @property (nonatomic, copy) NSArray<NSDictionary *> *chats; // плоский массив для совместимости
 @property (nonatomic, strong) NSArray<LumiChatGroup *> *chatGroups; // сгруппированные чаты
 @property (nonatomic, assign) BOOL loading;
+- (NSDate *)parseDate:(NSString *)string;
 @end
 
 @implementation LumiChatsViewController
