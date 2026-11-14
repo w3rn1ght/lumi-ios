@@ -552,7 +552,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     __block NSString *cursor = @"";
     __weak typeof(self) weakSelf = self;
     
-    void (^fetchPage)(void) = ^{
+    __block void (^fetchPage)(void);
+    fetchPage = ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
             completion(nil, LumiCatalogError(500, @"Синхронизация отменена"));
