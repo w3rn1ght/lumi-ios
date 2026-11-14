@@ -517,8 +517,6 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 }
 
 }
-    [self syncStoryIDs];
-}
 
 - (void)syncCharacterIDs {
     [self updateProgressWithPhase:@"Персонажи" phaseDone:0 phaseTotal:0];
@@ -596,7 +594,6 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             
             if (nextCursor.length) {
                 cursor = nextCursor;
-                # Update progress periodically
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [weakSelf updateProgressWithPhase:kind phaseDone:allCards.count phaseTotal:0];
                     [weakSelf notifyUpdate];
@@ -651,7 +648,32 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         [strongSelf finishSync];
     }];
 }
+
+- (void)finishSync {
+    self.isSyncing = NO;
+    self.syncPhase = nil;
+    self.syncStatus = nil;
+    [self saveCache];
+    [self notifyUpdateNow];
 }
+
+- (NSArray<NSDictionary *> *)sortedCharacters:(NSArray<NSDictionary *> *)characters {
+    return [characters sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *obj1, NSDictionary *obj2) {
+        return [obj2[@"name"] compare:obj1[@"name"]];
+    }];
+}
+
+- (NSArray<NSDictionary *> *)sortedStories:(NSArray<NSDictionary *> *)stories {
+    return [stories sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *obj1, NSDictionary *obj2) {
+        return [obj2[@"title"] compare:obj1[@"title"]];
+    }];
+}
+
+- (NSArray<NSDictionary *> *)charactersMatchingQuery:(nullable NSString *)query tag:(nullable NSString *)tag { return @[]; }
+- (NSArray<NSDictionary *> *)storiesMatchingQuery:(nullable NSString *)query tag:(nullable NSString *)tag { return @[]; }
+- (NSArray<NSDictionary *> *)charactersMatchingQuery:(nullable NSString *)query tags:(nullable NSArray<NSString *> *)tags { return @[]; }
+- (NSArray<NSDictionary *> *)storiesMatchingQuery:(nullable NSString *)query tags:(nullable NSArray<NSString *> *)tags { return @[]; }
+- (nullable NSDictionary *)characterWithID:(nullable NSString *)identifier { return nil; }
 
 - (void)syncStoriesWithCursor {
     [self updateProgressWithPhase:@"Истории" phaseDone:0 phaseTotal:0];
