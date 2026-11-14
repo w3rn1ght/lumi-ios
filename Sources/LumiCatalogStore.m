@@ -335,7 +335,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.syncPhase = @"Персонажи";
     self.syncStatus = nil;
     [self notifyUpdateNow];
-    [self syncCharacterIDs];
+    [self syncCharactersWithCursor];
 }
 
 - (void)forceRefresh {
@@ -503,7 +503,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     if (failed > 0) {
         [self scheduleCharacterRetry];
     }
-    [self syncStoryIDs];
+    [self syncStoriesWithCursor];
 }
 
 - (void)syncCharactersWithCursor {

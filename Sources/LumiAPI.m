@@ -57,8 +57,8 @@ static BOOL LumiIsSessionCookie(NSHTTPCookie *cookie) {
 }
 
 static NSString *LumiEncodeQueryValue(NSString *value) {
-    NSCharacterSet *allowed = [NSCharacterSet alphanumericCharacterSet];
-    allowed = [allowed characterSetByAddingCharactersInString:@"-_.~"];
+    NSMutableCharacterSet *allowed = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
+    [allowed addCharactersInString:@"-_.~"];
     return [value stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: value;
 }
 
@@ -169,6 +169,11 @@ static NSString *LumiEncodePath(NSString *path) {
                        content:(NSString *)content
                   eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
                     completion:(void (^)(NSError *))completion;
+- (instancetype)initWithChatID:(NSString *)chatID
+                           path:(NSString *)path
+                           body:(NSDictionary *)body
+                   eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
+                     completion:(void (^)(NSError *))completion;
 @end
 
 @interface LumiAPI ()
@@ -507,7 +512,7 @@ static NSString *LumiEncodePath(NSString *path) {
 - (void)fetchCharacterCardsWithCursor:(NSString *)cursor
                          completion:(LumiAPICompletion)completion {
     NSString *path = [NSString stringWithFormat:@"/characters?scope=all&fields=card&limit=100&sort=popular%@",
-                      cursor ? [NSString stringWithFormat:@"&cursor=%@", [self class] LumiEncodeQueryValue:cursor] : @""];
+                      cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                       path:path
                                                    baseURL:kAPIBaseURL
@@ -519,7 +524,7 @@ static NSString *LumiEncodePath(NSString *path) {
 - (void)fetchStoryCardsWithCursor:(NSString *)cursor
                      completion:(LumiAPICompletion)completion {
     NSString *path = [NSString stringWithFormat:@"/stories?scope=all&fields=card&limit=100&sort=popular%@",
-                      cursor ? [NSString stringWithFormat:@"&cursor=%@", [self class] LumiEncodeQueryValue:cursor] : @""];
+                      cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                       path:path
                                                    baseURL:kAPIBaseURL
