@@ -47,6 +47,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 @property (nonatomic, assign) NSTimeInterval lastNotifyTime;
 @property (nonatomic, assign) NSUInteger characterRetryRounds;
 @property (nonatomic, assign) BOOL pendingCharacterRetry;
+/// YES when the cache was built from the authenticated cursor-paged endpoints,
+/// which return the full catalog instead of the public 1000-item preview.
+@property (nonatomic, assign) BOOL catalogFromAuthenticatedSource;
 @end
 
 @implementation LumiCatalogStore

@@ -47,8 +47,8 @@
     if (@available(iOS 11.0, *)) {
         navigation.navigationBar.prefersLargeTitles = NO;
     }
-    controller.title = title;
-    controller.tabBarItem = [[UITabBarItem alloc] initWithTitle:title image:nil selectedImage:nil];
+    controller.title = nil;
+    controller.tabBarItem = [[UITabBarItem alloc] initWithTitle:nil image:nil selectedImage:nil];
     return navigation;
 }
 

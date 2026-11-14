@@ -156,6 +156,15 @@ static NSString *LumiEncodePath(NSString *path) {
     return encoded ?: path;
 }
 
+/// Cursors are opaque base64 strings, so every reserved character must be
+/// escaped before it is embedded into a query string.
+static NSString *LumiEncodeQueryValue(NSString *value) {
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
+    NSString *encoded = [value stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+    return encoded ?: value;
+}
+
 #pragma mark - API client
 
 @interface LumiChatStream (LumiPrivate)
@@ -466,6 +475,50 @@ static NSString *LumiEncodePath(NSString *path) {
     [self fetchIDListWithPublicPath:@"/public/stories?limit=1000"
                     authenticatedPath:@"/stories?limit=1000"
                          completion:completion];
+}
+
+/// Authenticated, cursor-paged catalog listing. Unlike `/public/characters`
+/// (capped at 1000 and ignoring `offset`), this endpoint returns every card in
+/// the catalog: ~1950 characters and ~390 stories. `fields=card` includes the
+/// name, cover, tags and message count, so no per-card detail requests needed.
+- (void)fetchCharacterCardsWithCursor:(NSString *)cursor
+                                limit:(NSInteger)limit
+                           completion:(LumiAPICompletion)completion {
+    [self fetchCatalogCardsWithKind:@"characters" cursor:cursor limit:limit completion:completion];
+}
+
+- (void)fetchStoryCardsWithCursor:(NSString *)cursor
+                            limit:(NSInteger)limit
+                       completion:(LumiAPICompletion)completion {
+    [self fetchCatalogCardsWithKind:@"stories" cursor:cursor limit:limit completion:completion];
+}
+
+- (void)fetchCatalogCardsWithKind:(NSString *)kind
+                           cursor:(NSString *)cursor
+                            limit:(NSInteger)limit
+                       completion:(LumiAPICompletion)completion {
+    NSInteger safeLimit = MAX(1, MIN(limit, 100));
+    NSMutableString *path = [NSMutableString stringWithFormat:
+        @"/%@?scope=all&fields=card&limit=%ld&sort=popular", kind, (long)safeLimit];
+    if (cursor.length) {
+        [path appendFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)];
+    }
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                     path:path
+                                                  baseURL:kAPIBaseURL
+                                                     body:nil
+                                                  timeout:40.0];
+    [self performRequest:request completion:^(id result, NSError *error) {
+        NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
+        NSArray *items = [dictionary[@"items"] isKindOfClass:[NSArray class]] ? dictionary[@"items"] : nil;
+        if (!items) {
+            completion(nil, error ?: LumiError(500, @"Не удалось загрузить каталог"));
+            return;
+        }
+        NSString *nextCursor = [dictionary[@"next_cursor"] isKindOfClass:[NSString class]]
+            ? dictionary[@"next_cursor"] : nil;
+        completion(@{@"items": items, @"next_cursor": nextCursor ?: @""}, nil);
+    }];
 }
 
 - (void)fetchIDListWithPublicPath:(NSString *)publicPath
