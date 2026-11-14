@@ -163,6 +163,11 @@ static NSString *LumiEncodePath(NSString *path) {
                        content:(NSString *)content
                   eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
                     completion:(void (^)(NSError *))completion;
+- (instancetype)initWithChatID:(NSString *)chatID
+                          path:(NSString *)path
+                          body:(NSDictionary *)body
+                  eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
+                    completion:(void (^)(NSError *))completion;
 @end
 
 @interface LumiAPI ()

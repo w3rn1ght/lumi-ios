@@ -375,8 +375,8 @@ static const NSInteger kLumiMaxSelectedGenres = 5;
         if (self.selectedTags.count >= kLumiMaxSelectedGenres) {
             UIAlertController *alert = [UIAlertController
                 alertControllerWithTitle:@"Максимум категорий"
-                                 message:[NSString stringWithFormat:@"Можно выбрать не больше %d категорий одновременно.",
-                                          kLumiMaxSelectedGenres]
+                                 message:[NSString stringWithFormat:@"Можно выбрать не больше %ld категорий одновременно.",
+                                          (long)kLumiMaxSelectedGenres]
                           preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"Понятно"
                                                       style:UIAlertActionStyleDefault
