@@ -376,7 +376,7 @@ static const NSInteger kLumiMaxSelectedGenres = 5;
             UIAlertController *alert = [UIAlertController
                 alertControllerWithTitle:@"Максимум категорий"
                                  message:[NSString stringWithFormat:@"Можно выбрать не больше %ld категорий одновременно.",
-                                          (long)kLumiMaxSelectedGenres
+                                          (long)kLumiMaxSelectedGenres]
                           preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"Понятно"
                                                       style:UIAlertActionStyleDefault
