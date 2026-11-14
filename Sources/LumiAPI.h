@@ -70,6 +70,17 @@ extern NSString *const LumiAuthDidChangeNotification;
 - (void)fetchStoryWithID:(NSString *)storyID completion:(LumiAPICompletion)completion;
 - (void)fetchTagsWithCompletion:(LumiAPICompletion)completion;
 
+/// Cursor-paged catalog cards (`GET /characters?scope=all&fields=card`).
+/// Requires a session; each result is `{items, next_cursor}`. The public
+/// `/public/characters` list stops at 1000 items, while these endpoints expose
+/// the whole catalog (~1950 characters / ~390 stories).
+- (void)fetchCharacterCardsWithCursor:(nullable NSString *)cursor
+                                limit:(NSInteger)limit
+                           completion:(LumiAPICompletion)completion;
+- (void)fetchStoryCardsWithCursor:(nullable NSString *)cursor
+                            limit:(NSInteger)limit
+                       completion:(LumiAPICompletion)completion;
+
 #pragma mark - Chats
 
 - (void)fetchChatsWithCompletion:(LumiAPICompletion)completion;

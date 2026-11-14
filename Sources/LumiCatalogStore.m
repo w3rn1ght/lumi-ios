@@ -11,6 +11,13 @@ static const NSUInteger kDetailConcurrency = 14;
 static const NSUInteger kDetailInitialWorkers = 10;
 static const NSUInteger kDetailMinimumWorkers = 3;
 
+/// Local error helper (LumiError is private to LumiAPI.m).
+static NSError *LumiCatalogError(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:LumiAPIErrorDomain
+                                code:code
+                            userInfo:@{NSLocalizedDescriptionKey: message ?: @"Ошибка"}];
+}
+
 typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     LumiCatalogSyncKindCharacter = 0,
     LumiCatalogSyncKindStory = 1,
@@ -47,6 +54,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 @property (nonatomic, assign) NSTimeInterval lastNotifyTime;
 @property (nonatomic, assign) NSUInteger characterRetryRounds;
 @property (nonatomic, assign) BOOL pendingCharacterRetry;
+/// YES when the cache was built from the authenticated cursor-paged endpoints,
+/// which return the full catalog instead of the public 1000-item preview.
 @end
 
 @implementation LumiCatalogStore
@@ -81,7 +90,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     return !self.isSyncing && self.syncStatus.length > 0;
 }
 
-- (NSString *)syncPercentString {    if (self.syncTotalCount == 0) {
+- (NSString *)syncPercentString {
+    if (self.syncTotalCount == 0) {
         return self.isSyncing ? @"0%" : @"100%";
     }
     double ratio = (double)self.syncCompletedCount / (double)self.syncTotalCount;
@@ -203,9 +213,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSString *base = [paths firstObject] ?: NSTemporaryDirectory();
     NSString *directory = [base stringByAppendingPathComponent:@"Lumi"];
     [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:NULL];
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                       error:NULL];
     return [directory stringByAppendingPathComponent:kCatalogFileName];
 }
 
@@ -335,7 +345,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.syncPhase = @"Персонажи";
     self.syncStatus = nil;
     [self notifyUpdateNow];
-    [self syncCharactersWithCursor];
+    [self syncCharacterIDs];
 }
 
 - (void)forceRefresh {
@@ -346,7 +356,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.pendingCharacterRetry = NO;
     [self startSyncWithPhase:@"Подготовка"];
     [self syncTags];
-    [self syncCharactersWithCursor];
+    [self syncCharacterIDs];
 }
 
 - (void)syncTags {
@@ -447,9 +457,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     __weak typeof(self) weakSelf = self;
     [self syncDetailsForIDs:missing
                        kind:LumiCatalogSyncKindCharacter
-                alreadyDone:known.count
-               overallTotal:ids.count
-                 completion:^(NSUInteger failed) {
+               alreadyDone:known.count
+              overallTotal:ids.count
+                completion:^(NSUInteger failed) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
             return;
@@ -506,713 +516,144 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     [self syncStoriesWithCursor];
 }
 
-- (void)syncCharactersWithCursor {
+}
+    [self syncStoryIDs];
+}
+
+- (void)syncCharacterIDs {
     [self updateProgressWithPhase:@"Персонажи" phaseDone:0 phaseTotal:0];
     [self recalculateProgress];
     [self notifyUpdate];
-
-    NSMutableArray *allCharacters = [NSMutableArray array];
+    
     __weak typeof(self) weakSelf = self;
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-retain-cycles"
-    __block void (^fetchPage)(NSString * _Nullable) = nil;
-    fetchPage = ^(NSString * _Nullable cursor) {
+    [self fetchAllCatalogCardsWithKind:@"characters"
+                          completion:^(NSArray<NSDictionary *> * _Nullable allCards, NSError * _Nullable error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) {
+        if (!strongSelf) return;
+        
+        if (error || !allCards) {
+            NSLog(@"[Lumi] catalog: character fetch error — %@", error);
+            [strongSelf failSyncWithError:error fallback:@"Не удалось загрузить список персонажей"];
             return;
         }
+        
+        strongSelf.totalCharacterCount = allCards.count;
+        strongSelf.characters = [strongSelf sortedCharacters:allCards];
+        strongSelf.syncedCharacterCount = allCards.count;
+        [strongSelf updateProgressWithPhase:@"Персонажи" phaseDone:allCards.count phaseTotal:allCards.count];
+        [strongSelf recalculateProgress];
+        [strongSelf notifyUpdate];
+        
+        NSLog(@"[Lumi] catalog: %lu персонажей загружено", (unsigned long)allCards.count);
+        [LumiDiagnostics log:@"каталог: %lu персонажей загружено", (unsigned long)allCards.count];
+        
+        [strongSelf syncStoryIDs];
+    }];
+}
 
-        [strongSelf.api fetchCharacterCardsWithCursor:cursor completion:^(id result, NSError *error) {
-            __strong typeof(weakSelf) strongSelf2 = weakSelf;
-            if (!strongSelf2) {
+- (void)fetchAllCatalogCardsWithKind:(NSString *)kind
+                          completion:(void (^)(NSArray<NSDictionary *> * _Nullable allCards, NSError * _Nullable error))completion {
+    NSMutableArray *allCards = [NSMutableArray array];
+    __block NSString *cursor = @"";
+    __weak typeof(self) weakSelf = self;
+    
+    __block void (^fetchPage)(void);
+    __weak void (^weakFetchPage)(void) = fetchPage;
+    fetchPage = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            completion(nil, LumiCatalogError(500, @"Синхронизация отменена"));
+            return;
+        }
+        
+        void (^fetchCompletion)(id, NSError *) = ^(id result, NSError *error) {
+            __strong typeof(weakSelf) sSelf = weakSelf;
+            if (!sSelf) {
+                completion(nil, LumiCatalogError(500, @"Синхронизация отменена"));
                 return;
             }
-
+            
             if (error) {
-                NSLog(@"[Lumi] catalog: character fetch error — %@", error);
-                [strongSelf2 failSyncWithError:error fallback:@"Не удалось загрузить персонажей"];
+                NSLog(@"[Lumi] catalog: %@ fetch error — %@", kind, error);
+                completion(nil, error);
                 return;
             }
-
-            NSArray *items = nil;
-            NSString *nextCursor = nil;
-            if ([result isKindOfClass:[NSDictionary class]]) {
-                items = result[@"items"];
-                nextCursor = result[@"next_cursor"];
-                NSLog(@"[Lumi] catalog: fetched character page — items: %lu, next_cursor: %@",
-                      (unsigned long)(items ? items.count : 0), nextCursor ?: @"(null)");
-            } else if ([result isKindOfClass:[NSArray class]]) {
-                items = result;
-                NSLog(@"[Lumi] catalog: fetched character page (array) — items: %lu", (unsigned long)items.count);
+            
+            NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
+            NSArray *items = [dictionary[@"items"] isKindOfClass:[NSArray class]] ? dictionary[@"items"] : nil;
+            if (!items) {
+                NSLog(@"[Lumi] catalog: unexpected %@ response type: %@", kind, [result class]);
+                completion(nil, LumiCatalogError(500, @"Некорректный ответ сервера"));
+                return;
+            }
+            
+            [allCards addObjectsFromArray:items];
+            NSLog(@"[Lumi] catalog: fetched %@ page — items: %lu, next_cursor: %@",
+                  kind, (unsigned long)items.count, dictionary[@"next_cursor"] ?: @"(null)");
+            
+            NSString *nextCursor = [dictionary[@"next_cursor"] isKindOfClass:[NSString class]]
+                ? dictionary[@"next_cursor"] : @"";
+            
+            if (nextCursor.length) {
+                cursor = nextCursor;
+                # Update progress periodically
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf updateProgressWithPhase:kind phaseDone:allCards.count phaseTotal:0];
+                    [weakSelf notifyUpdate];
+                });
+                void (^strongFetchPage)(void) = weakFetchPage;
+                if (strongFetchPage) strongFetchPage();
             } else {
-                NSLog(@"[Lumi] catalog: unexpected character response type: %@", [result class]);
+                completion([allCards copy], nil);
             }
-
-            if ([items isKindOfClass:[NSArray class]] && items.count > 0) {
-                [allCharacters addObjectsFromArray:items];
-                [strongSelf2 updateProgressWithPhase:@"Персонажи" phaseDone:allCharacters.count phaseTotal:0];
-                [strongSelf2 recalculateProgress];
-                [strongSelf2 notifyUpdate];
-            }
-
-            if (nextCursor && [nextCursor isKindOfClass:[NSString class]] && nextCursor.length > 0) {
-                fetchPage(nextCursor);
-            } else {
-                // All pages fetched, finalize characters
-                strongSelf2.characters = [strongSelf2 sortedCharacters:allCharacters];
-                strongSelf2.totalCharacterCount = allCharacters.count;
-                strongSelf2.syncedCharacterCount = allCharacters.count;
-                [strongSelf2 updateProgressWithPhase:@"Персонажи" phaseDone:allCharacters.count phaseTotal:allCharacters.count];
-                [strongSelf2 recalculateProgress];
-                [strongSelf2 notifyUpdate];
-                NSLog(@"[Lumi] catalog: %lu characters loaded via cursor pagination", (unsigned long)allCharacters.count);
-                [LumiDiagnostics log:@"каталог: загружено %lu персонажей", (unsigned long)allCharacters.count];
-                [strongSelf2 syncStoriesWithCursor];
-            }
-        }];
+        };
+        
+        if ([kind isEqualToString:@"characters"]) {
+            [strongSelf.api fetchCharacterCardsWithCursor:cursor limit:100 completion:fetchCompletion];
+        } else if ([kind isEqualToString:@"stories"]) {
+            [strongSelf.api fetchStoryCardsWithCursor:cursor limit:100 completion:fetchCompletion];
+        } else {
+            completion(nil, LumiCatalogError(500, @"Неизвестный тип каталога"));
+        }
     };
-#pragma clang diagnostic pop
+    
+    weakFetchPage = fetchPage;
+    fetchPage();
+}
 
-
-    fetchPage(nil);
+- (void)syncStoryIDs {
+    [self updateProgressWithPhase:@"Истории" phaseDone:0 phaseTotal:0];
+    [self recalculateProgress];
+    [self notifyUpdate];
+    
+    __weak typeof(self) weakSelf = self;
+    [self fetchAllCatalogCardsWithKind:@"stories"
+                          completion:^(NSArray<NSDictionary *> * _Nullable allCards, NSError * _Nullable error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        if (error || !allCards) {
+            NSLog(@"[Lumi] catalog: story fetch error — %@", error);
+            [strongSelf failSyncWithError:error fallback:@"Не удалось загрузить список историй"];
+            return;
+        }
+        
+        strongSelf.totalStoryCount = allCards.count;
+        strongSelf.stories = [strongSelf sortedStories:allCards];
+        strongSelf.syncedStoryCount = allCards.count;
+        [strongSelf updateProgressWithPhase:@"Истории" phaseDone:allCards.count phaseTotal:allCards.count];
+        [strongSelf recalculateProgress];
+        [strongSelf notifyUpdate];
+        
+        NSLog(@"[Lumi] catalog: %lu историй загружено", (unsigned long)allCards.count);
+        [LumiDiagnostics log:@"каталог: %lu историй загружено", (unsigned long)allCards.count];
+        
+        [strongSelf finishSync];
+    }];
+}
 }
 
 - (void)syncStoriesWithCursor {
     [self updateProgressWithPhase:@"Истории" phaseDone:0 phaseTotal:0];
     [self recalculateProgress];
     [self notifyUpdate];
-
-    NSMutableArray *allStories = [NSMutableArray array];
-    __weak typeof(self) weakSelf = self;
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-retain-cycles"
-    __block void (^fetchPage)(NSString * _Nullable) = nil;
-    fetchPage = ^(NSString * _Nullable cursor) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) {
-            return;
-        }
-
-        [strongSelf.api fetchStoryCardsWithCursor:cursor completion:^(id result, NSError *error) {
-            __strong typeof(weakSelf) strongSelf2 = weakSelf;
-            if (!strongSelf2) {
-                return;
-            }
-
-            if (error) {
-                NSLog(@"[Lumi] catalog: story fetch error — %@", error);
-                [strongSelf2 failSyncWithError:error fallback:@"Не удалось загрузить истории"];
-                return;
-            }
-
-            NSArray *items = nil;
-            NSString *nextCursor = nil;
-            if ([result isKindOfClass:[NSDictionary class]]) {
-                items = result[@"items"];
-                nextCursor = result[@"next_cursor"];
-                NSLog(@"[Lumi] catalog: fetched story page — items: %lu, next_cursor: %@",
-                      (unsigned long)(items ? items.count : 0), nextCursor ?: @"(null)");
-            } else if ([result isKindOfClass:[NSArray class]]) {
-                items = result;
-                NSLog(@"[Lumi] catalog: fetched story page (array) — items: %lu", (unsigned long)items.count);
-            } else {
-                NSLog(@"[Lumi] catalog: unexpected story response type: %@", [result class]);
-            }
-
-            if ([items isKindOfClass:[NSArray class]] && items.count > 0) {
-                [allStories addObjectsFromArray:items];
-                [strongSelf2 updateProgressWithPhase:@"Истории" phaseDone:allStories.count phaseTotal:0];
-                [strongSelf2 recalculateProgress];
-                [strongSelf2 notifyUpdate];
-            }
-
-            if (nextCursor && [nextCursor isKindOfClass:[NSString class]] && nextCursor.length > 0) {
-                fetchPage(nextCursor);
-            } else {
-                // All pages fetched, finalize stories
-                strongSelf2.stories = [strongSelf2 sortedStories:allStories];
-                strongSelf2.totalStoryCount = allStories.count;
-                strongSelf2.syncedStoryCount = allStories.count;
-                [strongSelf2 updateProgressWithPhase:@"Истории" phaseDone:allStories.count phaseTotal:allStories.count];
-                [strongSelf2 recalculateProgress];
-                [strongSelf2 saveCache];
-                NSLog(@"[Lumi] catalog: %lu stories loaded via cursor pagination", (unsigned long)allStories.count);
-                [LumiDiagnostics log:@"каталог: загружено %lu историй", (unsigned long)allStories.count];
-                [strongSelf2 finishSync];
-            }
-        }];
-    };
-#pragma clang diagnostic pop
-
-
-    fetchPage(nil);
-}
-
-- (void)finishSync {
-    self.isSyncing = NO;
-    self.syncPhase = nil;
-    self.syncStatus = nil;
-    [self saveCache];
-    NSLog(@"[Lumi] catalog sync finished: %lu characters, %lu stories",
-          (unsigned long)self.characters.count, (unsigned long)self.stories.count);
-    [LumiDiagnostics log:@"каталог: готово — %lu персонажей / %lu историй",
-     (unsigned long)self.characters.count, (unsigned long)self.stories.count];
-    [self notifyUpdateNow];
-
-    if (self.pendingCharacterRetry) {
-        self.pendingCharacterRetry = NO;
-        if (self.characterRetryRounds < 3) {
-            self.characterRetryRounds += 1;
-            __weak typeof(self) weakSelf = self;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                [weakSelf retryFailedCharacterDetails];
-            });
-        }
-    }
-}
-
-/// Downloads details with a fixed worker pool (no thread blocking). A single
-/// dead TLS handshake must not end the whole catalog: failed IDs are retried in
-/// up to three passes, and the API itself cancels hung requests after 9 s.
-- (void)syncDetailsForIDs:(NSArray<NSString *> *)identifiers
-                     kind:(LumiCatalogSyncKind)kind
-              alreadyDone:(NSUInteger)alreadyDone
-             overallTotal:(NSUInteger)overallTotal
-               completion:(void (^)(NSUInteger failed))completion {
-    NSArray<NSString *> *ids = [identifiers copy];
-    if (!ids.count) {
-        completion(0);
-        return;
-    }
-
-    LumiAPI *api = self.api;
-    dispatch_queue_t scheduler = dispatch_queue_create("com.w3rn1ght.lumi.catalog.workers", DISPATCH_QUEUE_SERIAL);
-    NSString *phase = kind == LumiCatalogSyncKindCharacter ? @"Персонажи" : @"Истории";
-    NSString *kindSlug = kind == LumiCatalogSyncKindCharacter ? @"characters" : @"stories";
-    NSUInteger reportEvery = kind == LumiCatalogSyncKindCharacter ? 10 : 8;
-    NSUInteger saveEvery = kind == LumiCatalogSyncKindCharacter ? 20 : 16;
-    NSUInteger totalIDs = ids.count;
-    __weak typeof(self) weakSelf = self;
-    __block BOOL finished = NO;
-    __block NSUInteger succeeded = 0;
-    __block NSUInteger activity = 0;
-    // Both blocks are held STRONG. The previous version kept `runPass`/`pump`
-    // as weak self-references, which silently killed the whole download: a
-    // `__block` variable that is not captured by any escaping block keeps its
-    // storage on the stack, so when `runPass` returned the block was released
-    // and `weakPump` became nil. The pool then started exactly `workers`
-    // requests (8 of 897) and never fetched another card again — which is
-    // precisely what the log showed. Cycles are broken by nil-ing both blocks
-    // on every terminal path.
-    __block void (^runPass)(NSArray<NSString *> *, NSUInteger);
-    __block void (^pump)(void);
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        weakSelf.syncFailedCount = 0;
-        weakSelf.syncRateLimited = NO;
-    });
-
-    runPass = ^(NSArray<NSString *> *passIDs, NSUInteger passIndex) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf || finished) {
-            return;
-        }
-        NSUInteger total = passIDs.count;
-        if (total == 0) {
-            finished = YES;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(0);
-            });
-            return;
-        }
-
-        __block NSUInteger nextIndex = 0;
-        __block NSUInteger completed = 0;
-        __block NSUInteger inFlight = 0;
-        __block NSUInteger rateLimited = 0;
-        __block NSUInteger errorLogs = 0;
-        __block NSUInteger failedCount = 0;
-        __block BOOL loggedFirstCard = NO;
-        const NSUInteger workers = 8;
-        NSMutableArray<NSString *> *failedIDs = [NSMutableArray array];
-        NSTimeInterval passStartedAt = [NSDate timeIntervalSinceReferenceDate];
-        [LumiDiagnostics log:@"каталог: старт %@ — %lu карточек, %lu воркеров",
-         phase, (unsigned long)total, (unsigned long)workers];
-
-        // Heartbeat: proves workers are alive even when no card completes for a
-        // while (e.g. every connection hangs). It runs on its own queue so a
-        // wedged worker scheduler still shows up in the log as a silent one.
-        dispatch_queue_t pulseQueue = dispatch_queue_create("com.w3rn1ght.lumi.catalog.pulse", DISPATCH_QUEUE_SERIAL);
-        __block void (^heartbeat)(void);
-        __block __weak void (^weakHeartbeat)(void);
-        heartbeat = ^{
-            if (finished || completed >= total) {
-                return;
-            }
-            [LumiDiagnostics log:@"каталог: пульс — %lu/%lu, в работе %lu, ошибок %lu, %.0f с",
-             (unsigned long)completed, (unsigned long)total, (unsigned long)inFlight,
-             (unsigned long)failedCount,
-             [NSDate timeIntervalSinceReferenceDate] - passStartedAt];
-            // Self-healing: if the pool somehow lost its pump, restart it
-            // instead of sitting at "в работе 0" forever.
-            if (inFlight == 0 && completed < total) {
-                dispatch_async(scheduler, ^{
-                    if (!finished && pump && inFlight == 0 && completed < total) {
-                        [LumiDiagnostics log:@"каталог: воркеры простаивают, перезапускаю с %lu",
-                         (unsigned long)completed];
-                        pump();
-                    }
-                });
-            }
-            void (^next)(void) = weakHeartbeat;
-            if (next) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                               pulseQueue, next);
-            }
-        };
-        weakHeartbeat = heartbeat;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                       pulseQueue, heartbeat);
-
-        pump = ^{
-            if (finished) {
-                return;
-            }
-            while (inFlight < workers && nextIndex < total) {
-                NSString *identifier = passIDs[nextIndex];
-                nextIndex += 1;
-                inFlight += 1;
-                [api fetchCatalogDetailWithKind:kindSlug
-                                     identifier:identifier
-                          includeFailureStatus:YES
-                                     completion:^(id result, NSError *error) {
-                    BOOL ok = !error && [result isKindOfClass:[NSDictionary class]];
-                    if (ok) {
-                        if (kind == LumiCatalogSyncKindCharacter) {
-                            [strongSelf addCharacterDetail:result];
-                        } else {
-                            [strongSelf addStoryDetail:result];
-                        }
-                    }
-                    dispatch_async(scheduler, ^{
-                        if (finished) {
-                            return;
-                        }
-                        activity += 1;
-                        completed += 1;
-                        inFlight -= 1;
-                        if (ok) {
-                            succeeded += 1;
-                            if (!loggedFirstCard) {
-                                loggedFirstCard = YES;
-                                [LumiDiagnostics log:@"каталог: первая карточка за %.1f с",
-                                 [NSDate timeIntervalSinceReferenceDate] - passStartedAt];
-                            }
-                        } else {
-                            failedCount += 1;
-                            [failedIDs addObject:identifier];
-                            if (error.code == 429) {
-                                rateLimited += 1;
-                            }
-                            if (errorLogs < 5) {
-                                errorLogs += 1;
-                                [LumiDiagnostics log:@"каталог: карточка %@ — %@",
-                                 [identifier substringToIndex:MIN((NSUInteger)8, identifier.length)],
-                                 error.localizedDescription ?: @"нет ответа"];
-                            }
-                        }
-
-                        if (completed % reportEvery == 0 || completed == total) {
-                            NSUInteger doneSnapshot = MIN(alreadyDone + succeeded, overallTotal);
-                            NSUInteger failedSnapshot = failedIDs.count;
-                            BOOL limitedSnapshot = rateLimited > 0;
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                if (kind == LumiCatalogSyncKindCharacter) {
-                                    strongSelf.syncedCharacterCount = doneSnapshot;
-                                } else {
-                                    strongSelf.syncedStoryCount = doneSnapshot;
-                                }
-                                strongSelf.syncFailedCount = failedSnapshot;
-                                strongSelf.syncRateLimited = limitedSnapshot;
-                                [strongSelf updateProgressWithPhase:phase
-                                                          phaseDone:doneSnapshot
-                                                         phaseTotal:overallTotal];
-                                [strongSelf recalculateProgress];
-                                [strongSelf notifyUpdate];
-                            });
-                            if (completed % saveEvery == 0) {
-                                dispatch_async(dispatch_get_main_queue(), ^{
-                                    [strongSelf saveCache];
-                                });
-                            }
-                            if (completed % 25 == 0) {
-                                NSTimeInterval elapsed = [NSDate timeIntervalSinceReferenceDate] - passStartedAt;
-                                [LumiDiagnostics log:@"каталог: %lu/%lu за %.0f с, ошибок %lu",
-                                 (unsigned long)completed, (unsigned long)total, elapsed,
-                                 (unsigned long)failedCount];
-                            }
-                        }
-
-                        if (completed == total) {
-                            if (failedIDs.count > 0 && passIndex < 2) {
-                                NSArray<NSString *> *retryIDs = [failedIDs copy];
-                                NSUInteger nextPass = passIndex + 1;
-                                NSLog(@"[Lumi] catalog: pass %lu failed %lu of %lu, retrying",
-                                      (unsigned long)(passIndex + 1),
-                                      (unsigned long)retryIDs.count,
-                                      (unsigned long)total);
-                                [LumiDiagnostics log:@"каталог: повтор %lu — осталось %lu из %lu",
-                                 (unsigned long)nextPass, (unsigned long)retryIDs.count,
-                                 (unsigned long)total];
-                                // Drop this pass's pool before the next one
-                                // starts so the blocks do not pile up.
-                                pump = nil;
-                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                                               scheduler, ^{
-                                    void (^next)(NSArray<NSString *> *, NSUInteger) = runPass;
-                                    if (next) {
-                                        next(retryIDs, nextPass);
-                                    }
-                                });
-                            } else {
-                                finished = YES;
-                                NSUInteger failedFinal = failedIDs.count;
-                                pump = nil;
-                                runPass = nil;
-                                dispatch_async(dispatch_get_main_queue(), ^{
-                                    completion(failedFinal);
-                                });
-                            }
-                            return;
-                        }
-
-                        pump();
-                    });
-                }];
-            }
-        };
-        pump();
-    };
-
-    dispatch_async(scheduler, ^{
-        runPass(ids, 0);
-    });
-
-    // Last-resort watchdog. With per-request cancellation this should never
-    // fire; it only protects against a framework-level hang.
-    // Extended to 30 seconds to allow retries for failed requests (up to 3 passes).
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)),
-                   scheduler, ^{
-        __block NSUInteger lastActivity = activity;
-        __block NSUInteger stallTicks = 0;
-        __block void (^watchdog)(void);
-        __block __weak void (^weakWatchdog)(void);
-        watchdog = ^{
-            if (finished) {
-                return;
-            }
-            if (activity != lastActivity) {
-                lastActivity = activity;
-                stallTicks = 0;
-            } else {
-                stallTicks += 1;
-            }
-            if (stallTicks >= 60) {
-                finished = YES;
-                pump = nil;
-                runPass = nil;
-                NSUInteger missing = totalIDs > succeeded ? totalIDs - succeeded : 0;
-                NSLog(@"[Lumi] catalog watchdog: %lu of %lu details unfinished",
-                      (unsigned long)missing, (unsigned long)totalIDs);
-                [LumiDiagnostics log:@"каталог: сторож остановил загрузку, не хватает %lu из %lu",
-                 (unsigned long)missing, (unsigned long)totalIDs];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    completion(missing);
-                });
-                return;
-            }
-            void (^nextWatchdog)(void) = weakWatchdog;
-            if (nextWatchdog) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
-                               scheduler, nextWatchdog);
-            }
-        };
-        weakWatchdog = watchdog;
-        watchdog();
-    });
-}
-
-#pragma mark - Detail handling
-
-- (void)addCharacterDetail:(NSDictionary *)detail {
-    if (![detail isKindOfClass:[NSDictionary class]]) {
-        return;
-    }
-    NSString *identifier = LumiAsString(LumiValue(detail, @"id"));
-    if (!identifier.length) {
-        return;
-    }
-    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-    entry[@"id"] = identifier;
-    entry[@"name"] = LumiAsString(LumiValue(detail, @"name")) ?: @"Персонаж";
-    NSString *avatar = LumiAsString(LumiValue(detail, @"avatar_url"));
-    if (avatar.length) {
-        entry[@"avatar_url"] = avatar;
-    }
-    NSString *tagline = LumiAsString(LumiValue(detail, @"tagline"));
-    if (tagline.length) {
-        entry[@"tagline"] = tagline;
-    }
-    NSArray *tags = LumiAsArray(LumiValue(detail, @"tags"));
-    if (tags.count) {
-        entry[@"tags"] = tags;
-    }
-    NSNumber *messageCount = LumiAsNumber(LumiValue(detail, @"message_count"));
-    if (messageCount) {
-        entry[@"message_count"] = messageCount;
-    }
-    NSString *ownerName = LumiNestedString(detail, @"owner", @"username");
-    if (ownerName.length) {
-        entry[@"owner"] = @{@"username": ownerName};
-    }
-    [self performState:^{
-        NSMutableArray *characters = [self.characters mutableCopy] ?: [NSMutableArray array];
-        NSUInteger existingIndex = NSNotFound;
-        for (NSUInteger index = 0; index < characters.count; index++) {
-            if ([characters[index][@"id"] isEqual:identifier]) {
-                existingIndex = index;
-                break;
-            }
-        }
-        if (existingIndex != NSNotFound) {
-            [characters replaceObjectAtIndex:existingIndex withObject:entry];
-        } else {
-            [characters addObject:entry];
-        }
-        self.characters = characters;
-    }];
-}
-
-- (void)addStoryDetail:(NSDictionary *)detail {
-    if (![detail isKindOfClass:[NSDictionary class]]) {
-        return;
-    }
-    NSString *identifier = LumiAsString(LumiValue(detail, @"id"));
-    if (!identifier.length) {
-        return;
-    }
-    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-    entry[@"id"] = identifier;
-    entry[@"title"] = LumiAsString(LumiValue(detail, @"title")) ?: @"История";
-    NSString *avatar = LumiAsString(LumiValue(detail, @"avatar_url"));
-    if (avatar.length) {
-        entry[@"avatar_url"] = avatar;
-    }
-    NSString *description = LumiAsString(LumiValue(detail, @"description"));
-    if (description.length > 400) {
-        description = [[description substringToIndex:400] stringByAppendingString:@"…"];
-    }
-    if (description.length) {
-        entry[@"description"] = description;
-    }
-    NSArray *tags = LumiAsArray(LumiValue(detail, @"tags"));
-    if (tags.count) {
-        entry[@"tags"] = tags;
-    }
-    NSNumber *messageCount = LumiAsNumber(LumiValue(detail, @"message_count"));
-    if (messageCount) {
-        entry[@"message_count"] = messageCount;
-    }
-    NSArray *castMembers = LumiAsArray(LumiValue(detail, @"cast_members"));
-    if (castMembers) {
-        NSMutableArray *cast = [NSMutableArray array];
-        for (id memberObject in castMembers) {
-            NSDictionary *member = LumiAsDictionary(memberObject);
-            if (!member) {
-                continue;
-            }
-            NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
-            if (member[@"id"]) {
-                cleaned[@"id"] = member[@"id"];
-            }
-            if (member[@"name"]) {
-                cleaned[@"name"] = member[@"name"];
-            }
-            if (member[@"avatar_url"]) {
-                cleaned[@"avatar_url"] = member[@"avatar_url"];
-            }
-            if (cleaned.count) {
-                [cast addObject:cleaned];
-            }
-        }
-        entry[@"cast"] = cast;
-    }
-    NSString *ownerName = LumiNestedString(detail, @"owner", @"username");
-    if (ownerName.length) {
-        entry[@"owner"] = @{@"username": ownerName};
-    }
-    [self performState:^{
-        NSMutableArray *stories = [self.stories mutableCopy] ?: [NSMutableArray array];
-        NSUInteger existingIndex = NSNotFound;
-        for (NSUInteger index = 0; index < stories.count; index++) {
-            if ([stories[index][@"id"] isEqual:identifier]) {
-                existingIndex = index;
-                break;
-            }
-        }
-        if (existingIndex != NSNotFound) {
-            [stories replaceObjectAtIndex:existingIndex withObject:entry];
-        } else {
-            [stories addObject:entry];
-        }
-        self.stories = stories;
-    }];
-}
-
-- (NSArray *)sortedCharacters:(NSArray *)characters {
-    return [characters sortedArrayUsingComparator:^NSComparisonResult(id leftObject, id rightObject) {
-        NSDictionary *left = LumiAsDictionary(leftObject);
-        NSDictionary *right = LumiAsDictionary(rightObject);
-        if (!left || !right) {
-            return NSOrderedSame;
-        }
-        NSInteger leftCount = [LumiAsNumber(LumiValue(left, @"message_count")) integerValue];
-        NSInteger rightCount = [LumiAsNumber(LumiValue(right, @"message_count")) integerValue];
-        if (leftCount != rightCount) {
-            return leftCount > rightCount ? NSOrderedAscending : NSOrderedDescending;
-        }
-        NSString *leftName = LumiAsString(LumiValue(left, @"name"))
-            ?: LumiAsString(LumiValue(left, @"title")) ?: @"";
-        NSString *rightName = LumiAsString(LumiValue(right, @"name"))
-            ?: LumiAsString(LumiValue(right, @"title")) ?: @"";
-        return [leftName localizedCaseInsensitiveCompare:rightName];
-    }];
-}
-
-- (NSArray *)sortedStories:(NSArray *)stories {
-    return [self sortedCharacters:stories];
-}
-
-#pragma mark - Queries
-
-- (NSArray<NSDictionary *> *)filterItems:(NSArray<NSDictionary *> *)items
-                                   query:(NSString *)query
-                                    tags:(NSArray<NSString *> *)tags
-                         primaryKeyName:(NSString *)primaryKey
-                       secondaryKeyName:(NSString *)secondaryKey {
-    NSArray *sorted = [self sortedCharacters:items];
-    NSMutableSet<NSString *> *wantedTags = [NSMutableSet set];
-    for (NSString *tag in tags) {
-        if ([tag isKindOfClass:[NSString class]] && tag.length && ![tag isEqualToString:@"Все"]) {
-            [wantedTags addObject:tag];
-        }
-    }
-    BOOL filterTags = wantedTags.count > 0;
-    NSString *trimmed = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSString *lowercaseQuery = trimmed.lowercaseString;
-
-    NSMutableArray *result = [NSMutableArray array];
-    for (NSDictionary *item in sorted) {
-        if (filterTags) {
-            NSArray *itemTags = LumiAsArray(LumiValue(item, @"tags"));
-            BOOL matchedTag = NO;
-            for (id tag in itemTags) {
-                if ([tag isKindOfClass:[NSString class]] && [wantedTags containsObject:tag]) {
-                    matchedTag = YES;
-                    break;
-                }
-            }
-            if (!matchedTag) {
-                continue;
-            }
-        }
-        if (lowercaseQuery.length) {
-            BOOL matched = NO;
-            for (NSString *key in @[primaryKey, secondaryKey]) {
-                id value = item[key];
-                if ([value isKindOfClass:[NSString class]]) {
-                    if ([[value lowercaseString] rangeOfString:lowercaseQuery].location != NSNotFound) {
-                        matched = YES;
-                        break;
-                    }
-                }
-            }
-            if (!matched) {
-                NSArray *tags = item[@"tags"];
-                if ([tags isKindOfClass:[NSArray class]]) {
-                    for (NSString *value in tags) {
-                        if ([value isKindOfClass:[NSString class]] &&
-                            [[value lowercaseString] rangeOfString:lowercaseQuery].location != NSNotFound) {
-                            matched = YES;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (!matched) {
-                NSString *owner = LumiNestedString(item, @"owner", @"username");
-                if (owner.length) {
-                    matched = [[owner lowercaseString] rangeOfString:lowercaseQuery].location != NSNotFound;
-                }
-            }
-            if (!matched) {
-                continue;
-            }
-        }
-        [result addObject:item];
-    }
-    return result;
-}
-
-- (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query tag:(NSString *)tag {
-    return [self charactersMatchingQuery:query tags:(tag.length ? @[tag] : nil)];
-}
-
-- (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query tag:(NSString *)tag {
-    return [self storiesMatchingQuery:query tags:(tag.length ? @[tag] : nil)];
-}
-
-- (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query tags:(NSArray<NSString *> *)tags {
-    return [self filterItems:self.characters
-                       query:query
-                        tags:tags ?: @[]
-             primaryKeyName:@"name"
-           secondaryKeyName:@"tagline"];
-}
-
-- (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query tags:(NSArray<NSString *> *)tags {
-    return [self filterItems:self.stories
-                       query:query
-                        tags:tags ?: @[]
-             primaryKeyName:@"title"
-           secondaryKeyName:@"description"];
-}
-
-- (NSDictionary *)characterWithID:(NSString *)identifier {
-    if (!identifier.length) {
-        return nil;
-    }
-    for (NSDictionary *character in self.characters) {
-        if ([character[@"id"] isEqual:identifier]) {
-            return character;
-        }
-    }
-    return nil;
-}
-
-- (NSDictionary *)storyWithID:(NSString *)identifier {
-    if (!identifier.length) {
-        return nil;
-    }
-    for (NSDictionary *story in self.stories) {
-        if ([story[@"id"] isEqual:identifier]) {
-            return story;
-        }
-    }
-    return nil;
-}
-
-@end

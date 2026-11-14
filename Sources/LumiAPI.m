@@ -100,66 +100,29 @@ static NSString *LumiEncodeQueryValue(NSString *value) {
 }
 
 + (void)markSessionActive:(BOOL)active {
-    [[self defaults] setBool:active forKey:kSessionMarkerKey];
-    [[self defaults] synchronize];
-}
-
-+ (void)clearSession {
     NSUserDefaults *defaults = [self defaults];
-    [defaults removeObjectForKey:kTokenKey];
-    [defaults removeObjectForKey:kRefreshKey];
-    [defaults removeObjectForKey:kUserCacheKey];
-    [defaults removeObjectForKey:kSessionMarkerKey];
+    [defaults setBool:active forKey:kSessionMarkerKey];
     [defaults synchronize];
-    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    for (NSHTTPCookie *cookie in [storage cookies]) {
-        if (LumiIsSessionCookie(cookie)) {
-            [storage deleteCookie:cookie];
-        }
-    }
 }
 
 @end
 
-#pragma mark - User
+#pragma mark - URL encoding
 
-@implementation LumiSessionUser
-
-+ (instancetype)userFromJSON:(NSDictionary *)json {
-    if (![json isKindOfClass:[NSDictionary class]]) {
-        return nil;
-    }
-    LumiSessionUser *user = [[LumiSessionUser alloc] init];
-    id identifier = json[@"id"] ?: json[@"user_id"];
-    user.userID = [identifier isKindOfClass:[NSString class]] ? identifier : @"";
-    id email = json[@"email"];
-    user.email = [email isKindOfClass:[NSString class]] ? email : nil;
-    id username = json[@"username"] ?: json[@"name"] ?: json[@"display_name"];
-    user.username = [username isKindOfClass:[NSString class]] ? username : nil;
-    id avatar = json[@"avatar_url"] ?: json[@"avatar"];
-    user.avatarURL = [avatar isKindOfClass:[NSString class]] ? avatar : nil;
-    return user;
-}
-
-- (NSString *)displayName {
-    if (self.username.length) {
-        return self.username;
-    }
-    if (self.email.length) {
-        return self.email;
-    }
-    return @"Аккаунт";
-}
-
-@end
-
-#pragma mark - Path encoding
-
-static NSString *LumiEncodePath(NSString *path) {
+static NSString *LumiEncodePathComponent(NSString *path) {
     NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
         @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/?&=+,:%"];
     NSString *encoded = [path stringByAddingPercentEncodingWithAllowedCharacters:allowed];
     return encoded ?: path;
+}
+
+/// Cursors are opaque base64 strings, so every reserved character must be
+/// escaped before it is embedded into a query string.
+static NSString *LumiEncodeQueryValue(NSString *value) {
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
+    NSString *encoded = [value stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+    return encoded ?: value;
 }
 
 #pragma mark - API client
@@ -170,10 +133,10 @@ static NSString *LumiEncodePath(NSString *path) {
                   eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
                     completion:(void (^)(NSError *))completion;
 - (instancetype)initWithChatID:(NSString *)chatID
-                           path:(NSString *)path
-                           body:(NSDictionary *)body
-                   eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
-                     completion:(void (^)(NSError *))completion;
+                       path:(NSString *)path
+                       body:(NSDictionary *)body
+               eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
+                 completion:(void (^)(NSError *))completion;
 @end
 
 @interface LumiAPI ()
@@ -182,9 +145,9 @@ static NSString *LumiEncodePath(NSString *path) {
 @property (nonatomic, strong, readwrite, nullable) NSString *refreshToken;
 @property (nonatomic, strong) NSURLSession *session;
 - (void)catalogFetchKind:(NSString *)kind
-              identifier:(NSString *)identifier
-                 attempt:(NSUInteger)attempt
-              completion:(LumiAPICompletion)completion;
+          identifier:(NSString *)identifier
+             attempt:(NSUInteger)attempt
+      completion:(LumiAPICompletion)completion;
 @end
 
 @implementation LumiAPI
@@ -201,149 +164,60 @@ static NSString *LumiEncodePath(NSString *path) {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
-        configuration.timeoutIntervalForRequest = 20.0;
-        configuration.timeoutIntervalForResource = 40.0;
-        configuration.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-        configuration.HTTPShouldSetCookies = YES;
-        configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        configuration.HTTPMaximumConnectionsPerHost = 6;
-        configuration.HTTPAdditionalHeaders = @{
-            @"Accept": @"application/json",
-            @"Accept-Language": @"ru,en;q=0.8",
-            @"X-Lang": @"ru",
-            @"Origin": kWebOrigin,
-            @"Referer": [kWebOrigin stringByAppendingString:@"/"],
-            @"X-Lumi-Client": @"ios-app",
-        };
-        _session = [NSURLSession sessionWithConfiguration:configuration];
-
-        _accessToken = [LumiSecureStore objectForKey:kTokenKey];
-        _refreshToken = [LumiSecureStore objectForKey:kRefreshKey];
-        NSDictionary *cached = [LumiSecureStore objectForKey:kUserCacheKey];
-        if ([cached isKindOfClass:[NSDictionary class]]) {
-            _currentUser = [LumiSessionUser userFromJSON:cached];
-        }
+        NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+        config.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+        config.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyAlways;
+        config.timeoutIntervalForRequest = 30;
+        config.timeoutIntervalForResource = 60;
+        config.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        self.session = [NSURLSession sessionWithConfiguration:config
+                                                      delegate:nil
+                                                 delegateQueue:[NSOperationQueue mainQueue]];
+        [self syncCookiesFromSharedStorage];
     }
     return self;
 }
 
-- (BOOL)isAuthenticated {
-    return [LumiSecureStore hasSessionMaterial];
-}
-
-- (NSArray<NSHTTPCookie *> *)lumiCookies {
-    NSMutableArray *result = [NSMutableArray array];
-    for (NSHTTPCookie *cookie in [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookies]) {
-        if ([cookie.domain containsString:@"lumi.site"]) {
-            [result addObject:cookie];
-        }
-    }
-    return result;
-}
-
 - (void)syncCookiesFromSharedStorage {
-    NSArray *cookies = [self lumiCookies];
-    BOOL hasSession = NO;
-    for (NSHTTPCookie *cookie in cookies) {
+    NSHTTPCookieStorage *shared = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    for (NSHTTPCookie *cookie in shared.cookies) {
         if (LumiIsSessionCookie(cookie)) {
-            hasSession = YES;
-            break;
+            [self.session.configuration.HTTPCookieStorage setCookie:cookie];
         }
     }
-    if (hasSession) {
-        [LumiSecureStore markSessionActive:YES];
-    }
-    NSLog(@"[Lumi] cookies=%lu session=%d", (unsigned long)cookies.count, hasSession);
 }
-
-- (void)storeCookies:(NSArray<NSHTTPCookie *> *)cookies {
-    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    NSInteger stored = 0;
-    for (NSHTTPCookie *cookie in cookies) {
-        if (![cookie.domain containsString:@"lumi.site"]) {
-            continue;
-        }
-        [storage setCookie:cookie];
-        if (LumiIsSessionCookie(cookie)) {
-            [LumiSecureStore markSessionActive:YES];
-        }
-        stored++;
-    }
-    NSLog(@"[Lumi] imported %ld cookies", (long)stored);
-}
-
-- (void)captureTokensFromPayload:(id)payload {
-    if (![payload isKindOfClass:[NSDictionary class]]) {
-        return;
-    }
-    NSDictionary *dictionary = payload;
-    id access = dictionary[@"access"];
-    if (![access isKindOfClass:[NSString class]]) {
-        access = dictionary[@"access_token"];
-    }
-    if (![access isKindOfClass:[NSString class]]) {
-        access = dictionary[@"token"];
-    }
-    if ([access isKindOfClass:[NSString class]] && [access length] > 10) {
-        self.accessToken = access;
-        [LumiSecureStore setObject:access forKey:kTokenKey];
-        [LumiSecureStore markSessionActive:YES];
-    }
-    id refresh = dictionary[@"refresh"];
-    if (![refresh isKindOfClass:[NSString class]]) {
-        refresh = dictionary[@"refresh_token"];
-    }
-    if ([refresh isKindOfClass:[NSString class]] && [refresh length] > 10) {
-        self.refreshToken = refresh;
-        [LumiSecureStore setObject:refresh forKey:kRefreshKey];
-    }
-}
-
-- (void)setCurrentUserJSON:(NSDictionary *)json {
-    if (![json isKindOfClass:[NSDictionary class]]) {
-        return;
-    }
-    NSMutableDictionary *cleaned = [NSMutableDictionary dictionary];
-    for (NSString *key in json) {
-        id value = json[key];
-        if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]]) {
-            cleaned[key] = value;
-        }
-    }
-    [LumiSecureStore setObject:cleaned forKey:kUserCacheKey];
-    [LumiSecureStore markSessionActive:YES];
-    self.currentUser = [LumiSessionUser userFromJSON:cleaned];
-}
-
-#pragma mark - Requests
 
 - (NSMutableURLRequest *)requestWithMethod:(NSString *)method
                                       path:(NSString *)path
                                    baseURL:(NSString *)baseURL
-                                      body:(id)body
-                                   timeout:(NSTimeInterval)timeout {
-    NSString *full = [baseURL stringByAppendingString:LumiEncodePath(path)];
-    NSURL *url = [NSURL URLWithString:full];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+                                      body:(nullable id)body
+                                 timeout:(NSTimeInterval)timeout {
+    NSString *urlString = [NSString stringWithFormat:@"%@%@", baseURL, path];
+    NSURL *url = [NSURL URLWithString:urlString];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                     timeoutInterval:timeout];
     request.HTTPMethod = method;
-    request.timeoutInterval = timeout;
-    [request setValue:kWebOrigin forHTTPHeaderField:@"Origin"];
-    [request setValue:[kWebOrigin stringByAppendingString:@"/"] forHTTPHeaderField:@"Referer"];
+    request.allHTTPHeaderFields = @{
+        @"Accept": @"application/json",
+        @"Content-Type": @"application/json",
+        @"User-Agent": @"Lumi-iOS/1.5.2",
+        @"Origin": kWebOrigin,
+    };
     if (self.accessToken.length) {
-        [request setValue:[@"Bearer " stringByAppendingString:self.accessToken] forHTTPHeaderField:@"Authorization"];
+        request.allHTTPHeaderFields[@"Authorization"] = [NSString stringWithFormat:@"Bearer %@", self.accessToken];
     }
     if (body) {
-        request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:NULL];
-        [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        NSError *jsonError = nil;
+        request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:&jsonError];
     }
     return request;
 }
 
 - (void)performRequest:(NSURLRequest *)request
-            completion:(LumiAPICompletion)completion {
+        completion:(LumiAPICompletion)completion {
     NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request
-                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                                                completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
         id json = nil;
         if (data.length) {
@@ -381,10 +255,10 @@ static NSString *LumiEncodePath(NSString *path) {
 - (void)refreshSessionWithCompletion:(void (^)(BOOL))completion {
     [self syncCookiesFromSharedStorage];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:@"/auth/me"
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:20.0];
+                                                      path:@"/auth/me"
+                                                   baseURL:kAuthBaseURL
+                                                      body:nil
+                                                   timeout:20.0];
     [self performRequest:request completion:^(id result, NSError *error) {
         NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
         NSDictionary *user = dictionary[@"user"];
@@ -401,13 +275,13 @@ static NSString *LumiEncodePath(NSString *path) {
 }
 
 - (void)loginWithEmail:(NSString *)email
-              password:(NSString *)password
-            completion:(LumiAPICompletion)completion {
+               password:(NSString *)password
+             completion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                     path:@"/auth/login"
-                                                  baseURL:kAuthBaseURL
-                                                     body:@{@"email": email ?: @"", @"password": password ?: @""}
-                                                  timeout:30.0];
+                                                      path:@"/auth/login"
+                                                   baseURL:kAuthBaseURL
+                                                      body:@{@"email": email ?: @"", @"password": password ?: @""}
+                                                   timeout:30.0];
     [self performRequest:request completion:^(id result, NSError *error) {
         if (error) {
             completion(result, error);
@@ -417,100 +291,54 @@ static NSString *LumiEncodePath(NSString *path) {
         NSDictionary *user = dictionary[@"user"];
         if ([user isKindOfClass:[NSDictionary class]]) {
             [self setCurrentUserJSON:user];
-        }
-        [self refreshSessionWithCompletion:^(BOOL ok) {
-            completion(dictionary ?: @{}, ok ? nil : LumiError(401, @"Не удалось проверить сессию"));
-        }];
-    }];
-}
-
-- (void)exchangeAppToken:(NSString *)token completion:(void (^)(NSError *))completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                     path:@"/auth/app/exchange"
-                                                  baseURL:kAPIBaseURL
-                                                     body:@{@"token": token ?: @""}
-                                                  timeout:30.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        if (error) {
-            completion(error);
+            completion(result, nil);
             return;
         }
-        NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
-        NSDictionary *user = dictionary[@"user"];
-        if ([user isKindOfClass:[NSDictionary class]]) {
-            [self setCurrentUserJSON:user];
-        }
-        [self syncCookiesFromSharedStorage];
-        completion(nil);
+        completion(result, LumiError(0, @"Неверный ответ сервера"));
     }];
 }
 
-- (void)logout {
+- (void)logoutWithCompletion:(void (^)(void))completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                     path:@"/auth/logout"
-                                                  baseURL:kAuthBaseURL
-                                                     body:@{}
-                                                  timeout:15.0];
+                                                      path:@"/auth/logout"
+                                                   baseURL:kAuthBaseURL
+                                                      body:nil
+                                                   timeout:20.0];
     [self performRequest:request completion:^(id result, NSError *error) {
-        NSLog(@"[Lumi] logout: %@", error ?: @"ok");
+        [LumiSecureStore markSessionActive:NO];
+        self.currentUser = nil;
+        self.accessToken = nil;
+        self.refreshToken = nil;
+        [[NSHTTPCookieStorage sharedHTTPCookieStorage] removeCookiesSinceDate:[NSDate distantPast]];
+        completion();
     }];
-    [LumiSecureStore clearSession];
-    self.currentUser = nil;
-    self.accessToken = nil;
-    self.refreshToken = nil;
+}
+
+- (BOOL)isAuthenticated {
+    return self.currentUser != nil || [LumiSecureStore hasSessionMaterial];
+}
+
+- (void)setCurrentUserJSON:(NSDictionary *)user {
+    self.currentUser = [[LumiSessionUser alloc] initWithDictionary:user];
+    [LumiSecureStore markSessionActive:YES];
+}
+
+- (void)captureTokensFromPayload:(nullable NSDictionary *)payload {
+    if (!payload) return;
+    if (payload[@"access_token"]) {
+        self.accessToken = payload[@"access_token"];
+        [LumiSecureStore setObject:self.accessToken forKey:kTokenKey];
+    }
+    if (payload[@"refresh_token"]) {
+        self.refreshToken = payload[@"refresh_token"];
+        [LumiSecureStore setObject:self.refreshToken forKey:kRefreshKey];
+    }
 }
 
 #pragma mark - Catalog
 
-- (void)fetchCharacterIDsWithCompletion:(LumiAPICompletion)completion {
-    [self fetchIDListWithPublicPath:@"/public/characters?limit=1000"
-                    authenticatedPath:@"/characters?limit=1000"
-                         completion:completion];
-}
-
-- (void)fetchStoryIDsWithCompletion:(LumiAPICompletion)completion {
-    [self fetchIDListWithPublicPath:@"/public/stories?limit=1000"
-                    authenticatedPath:@"/stories?limit=1000"
-                         completion:completion];
-}
-
-- (void)fetchIDListWithPublicPath:(NSString *)publicPath
-                authenticatedPath:(NSString *)authenticatedPath
-                       completion:(LumiAPICompletion)completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:publicPath
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:40.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        id items = [result isKindOfClass:[NSDictionary class]] ? result[@"items"] : nil;
-        if ([items isKindOfClass:[NSArray class]]) {
-            completion(items, nil);
-            return;
-        }
-        BOOL shouldRetryAuthenticated = (error.code == 401 || error.code == 403) && [self isAuthenticated];
-        if (!shouldRetryAuthenticated) {
-            completion(nil, error ?: LumiError(500, @"Не удалось загрузить каталог"));
-            return;
-        }
-        NSMutableURLRequest *retry = [self requestWithMethod:@"GET"
-                                                       path:authenticatedPath
-                                                    baseURL:kAPIBaseURL
-                                                       body:nil
-                                                    timeout:40.0];
-        [self performRequest:retry completion:^(id retryResult, NSError *retryError) {
-            id retryItems = [retryResult isKindOfClass:[NSDictionary class]] ? retryResult[@"items"] : nil;
-            if ([retryItems isKindOfClass:[NSArray class]]) {
-                completion(retryItems, nil);
-                return;
-            }
-            completion(nil, retryError ?: LumiError(500, @"Не удалось загрузить каталог"));
-        }];
-    }];
-}
-
 - (void)fetchCharacterCardsWithCursor:(NSString *)cursor
-                         completion:(LumiAPICompletion)completion {
+                     completion:(LumiAPICompletion)completion {
     NSString *path = [NSString stringWithFormat:@"/characters?scope=all&fields=card&limit=100&sort=popular%@",
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
@@ -522,7 +350,7 @@ static NSString *LumiEncodePath(NSString *path) {
 }
 
 - (void)fetchStoryCardsWithCursor:(NSString *)cursor
-                     completion:(LumiAPICompletion)completion {
+                   completion:(LumiAPICompletion)completion {
     NSString *path = [NSString stringWithFormat:@"/stories?scope=all&fields=card&limit=100&sort=popular%@",
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
@@ -535,221 +363,92 @@ static NSString *LumiEncodePath(NSString *path) {
 
 - (void)fetchCharacterWithID:(NSString *)characterID completion:(LumiAPICompletion)completion {
     [self fetchDetailWithPublicPath:[NSString stringWithFormat:@"/public/characters/%@", characterID]
-                  authenticatedPath:[NSString stringWithFormat:@"/characters/%@", characterID]
-                         completion:completion];
+              authenticatedPath:[NSString stringWithFormat:@"/characters/%@", characterID]
+                     completion:completion];
 }
 
 - (void)fetchStoryWithID:(NSString *)storyID completion:(LumiAPICompletion)completion {
     [self fetchDetailWithPublicPath:[NSString stringWithFormat:@"/public/stories/%@", storyID]
-                  authenticatedPath:[NSString stringWithFormat:@"/stories/%@", storyID]
-                         completion:completion];
+              authenticatedPath:[NSString stringWithFormat:@"/stories/%@", storyID]
+                     completion:completion];
 }
 
 - (void)fetchDetailWithPublicPath:(NSString *)publicPath
-                authenticatedPath:(NSString *)authenticatedPath
-                       completion:(LumiAPICompletion)completion {
+            authenticatedPath:(NSString *)authenticatedPath
+                   completion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:publicPath
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:25.0];
+                                                      path:publicPath
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:25.0];
     [self performRequest:request completion:^(id result, NSError *error) {
         if (!error && [result isKindOfClass:[NSDictionary class]]) {
             completion(result, nil);
             return;
         }
-        if (error.code == 429) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                [self fetchDetailWithPublicPath:publicPath
-                              authenticatedPath:authenticatedPath
-                                     completion:completion];
-            });
-            return;
-        }
-        if ((error.code == 401 || error.code == 403) && [self isAuthenticated]) {
+        if (error && error.code == 404) {
             NSMutableURLRequest *retry = [self requestWithMethod:@"GET"
                                                            path:authenticatedPath
                                                         baseURL:kAPIBaseURL
                                                            body:nil
                                                         timeout:25.0];
-            [self performRequest:retry completion:completion];
-            return;
-        }
-        completion(result, error);
-    }];
-}
-
-#pragma mark - Catalog detail (off-main)
-
-/// Bulk catalog loading issues ~1000 requests. Three things make this
-/// different from the generic `performRequest:` path:
-///
-/// 1. Every lane gets its own ephemeral NSURLSession with a single connection.
-///    A stale/wedged connection on the shared session used to hang a request
-///    forever and poison every later request multiplexed onto it.
-/// 2. Lanes are hedged: if the first connection has not answered after 2.5 s, a
-///    second one is opened in parallel and the first answer wins. Roughly 15%
-///    of connections to the API never answer at all, so waiting for them in
-///    line was what made the catalog crawl.
-/// 3. The deadline is enforced by ourselves: when it fires we settle the
-///    request, tear the sessions down and retry on a *new* connection. We never
-///    depend on `[task cancel]` delivering a completion handler — it often
-///    does not, which left workers stuck forever and stopped the whole sync.
-- (void)fetchCatalogDetailWithKind:(NSString *)kind
-                        identifier:(NSString *)identifier
-             includeFailureStatus:(BOOL)includeFailureStatus
-                        completion:(LumiAPICompletion)completion {
-    (void)includeFailureStatus;
-    [self catalogFetchKind:kind identifier:identifier attempt:0 completion:completion];
-}
-
-/// One attempt = up to two *hedged* lanes. The server randomly leaves ~15% of
-/// connections unanswered; on a fresh connection the same card answers in
-/// ~0.3 s. Waiting the full deadline for such a card wastes 10 s of a worker,
-/// so a second lane starts after `kLumiHedgeDelay` and the first answer wins.
-/// The loser is torn down immediately, and the overall deadline (6.5 s) is
-/// enforced by us — never by NSURLSession, whose completion handler is not
-/// guaranteed to fire for a wedged connection.
-static const double kLumiHedgeDelay = 2.5;
-static const double kLumiLaneDeadline = 6.5;
-
-- (void)catalogFetchKind:(NSString *)kind
-              identifier:(NSString *)identifier
-                 attempt:(NSUInteger)attempt
-              completion:(LumiAPICompletion)completion {
-    if (!completion) {
-        return;
-    }
-
-    NSString *path = [NSString stringWithFormat:@"/public/%@/%@", kind, identifier];
-    NSURL *url = [NSURL URLWithString:[kAPIBaseURL stringByAppendingString:path]];
-    if (!url) {
-        completion(nil, LumiError(400, @"Некорректный адрес карточки"));
-        return;
-    }
-
-    NSObject *gate = [[NSObject alloc] init];
-    NSMutableArray<NSURLSession *> *sessions = [NSMutableArray arrayWithCapacity:2];
-    __block BOOL settled = NO;
-
-    void (^settle)(NSData *, NSURLResponse *, NSError *, BOOL) = ^(NSData *data, NSURLResponse *response, NSError *error, BOOL timedOut) {
-        NSArray<NSURLSession *> *doomed = nil;
-        @synchronized (gate) {
-            if (settled) {
-                return;
-            }
-            settled = YES;
-            doomed = [sessions copy];
-            [sessions removeAllObjects];
-        }
-        for (NSURLSession *session in doomed) {
-            [session invalidateAndCancel];
-        }
-
-        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-        NSInteger status = http ? http.statusCode : 0;
-        id json = nil;
-        if (data.length) {
-            json = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
-        }
-        if (!timedOut && !error && status >= 200 && status < 300 && [json isKindOfClass:[NSDictionary class]]) {
-            completion(json, nil);
-            return;
-        }
-
-        // A card is retried up to 5 times; a permanently broken card cannot
-        // hold a worker forever.
-        NSUInteger maxAttempts = 5;
-        BOOL retryable = timedOut || error != nil || status == 429 || status >= 500 || status == 0;
-        if (retryable && attempt + 1 < maxAttempts) {
-            double delay = 0.2 + 0.3 * (double)attempt;
-            if (status == 429) {
-                delay = (double)(1 << MIN(attempt, (NSUInteger)4));
-            }
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
-                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                [self catalogFetchKind:kind
-                            identifier:identifier
-                               attempt:attempt + 1
-                            completion:completion];
+            [self performRequest:retry completion:^(id retryResult, NSError *retryError) {
+                if (!retryError && [retryResult isKindOfClass:[NSDictionary class]]) {
+                    completion(retryResult, nil);
+                    return;
+                }
+                completion(nil, retryError ?: error);
             });
             return;
         }
-
-        NSString *message = timedOut ? @"Тайм-аут соединения"
-                           : (status ? [NSString stringWithFormat:@"HTTP %ld", (long)status]
-                                     : (error.localizedDescription ?: @"Сетевая ошибка"));
-        completion(json, LumiError(status ?: (timedOut ? 408 : 500), message));
-    };
-
-    // Each lane gets its own ephemeral session so it always owns a brand-new
-    // TCP+TLS connection. Reusing the shared session is exactly what made a
-    // single wedged connection stall every later request.
-    void (^startLane)(void) = ^{
-        @synchronized (gate) {
-            if (settled) {
-                return;
-            }
-        }
-        NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        configuration.timeoutIntervalForRequest = kLumiLaneDeadline;
-        configuration.timeoutIntervalForResource = kLumiLaneDeadline;
-        configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        configuration.HTTPMaximumConnectionsPerHost = 1;
-        configuration.HTTPShouldUsePipelining = NO;
-        configuration.HTTPShouldSetCookies = NO;
-        configuration.HTTPCookieStorage = nil;
-        configuration.URLCache = nil;
-        configuration.HTTPAdditionalHeaders = @{
-            @"Accept": @"application/json",
-            @"Accept-Language": @"ru,en;q=0.8",
-            @"X-Lang": @"ru",
-            @"Origin": kWebOrigin,
-            @"Referer": [kWebOrigin stringByAppendingString:@"/"],
-            @"X-Lumi-Client": @"ios-app",
-        };
-        NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
-        @synchronized (gate) {
-            if (settled) {
-                [session invalidateAndCancel];
-                return;
-            }
-            [sessions addObject:session];
-        }
-
-        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-        request.HTTPMethod = @"GET";
-        request.timeoutInterval = kLumiLaneDeadline;
-        request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-        // Public catalog payloads never depend on the account: dropping the
-        // bearer token keeps the auth middleware out of a 1000-request crawl.
-        [request setValue:nil forHTTPHeaderField:@"Authorization"];
-
-        NSURLSessionDataTask *task = [session dataTaskWithRequest:request
-                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            settle(data, response, error, NO);
-        }];
-        [task resume];
-    };
-
-    startLane();
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLumiHedgeDelay * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        startLane();
-    });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLumiLaneDeadline * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        settle(nil, nil, nil, YES);
-    });
+        completion(nil, error);
+    }];
 }
 
 - (void)fetchTagsWithCompletion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:@"/tags"
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:25.0];
+                                                      path:@"/tags"
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:20.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)fetchCharactersWithQuery:(NSString *)query
+                           tag:(NSString *)tag
+                      completion:(LumiAPICompletion)completion {
+    NSMutableArray *params = [NSMutableArray array];
+    if (query.length) [params addObject:[NSString stringWithFormat:@"q=%@", LumiEncodeQueryValue(query)]];
+    if (tag.length && ![tag isEqualToString:@"Все"]) [params addObject:[NSString stringWithFormat:@"tag=%@", LumiEncodeQueryValue(tag)]];
+    params addObject:@"scope=all";
+    params addObject:@"fields=card";
+    params addObject:@"limit=100";
+    params addObject:@"sort=popular";
+    NSString *path = [NSString stringWithFormat:@"/characters?%@", [params componentsJoinedByString:@"&"]];
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:30.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)fetchStoriesWithQuery:(NSString *)query
+                          tag:(NSString *)tag
+                     completion:(LumiAPICompletion)completion {
+    NSMutableArray *params = [NSMutableArray array];
+    if (query.length) [params addObject:[NSString stringWithFormat:@"q=%@", LumiEncodeQueryValue(query)]];
+    if (tag.length && ![tag isEqualToString:@"Все"]) [params addObject:[NSString stringWithFormat:@"tag=%@", LumiEncodeQueryValue(tag)]];
+    params addObject:@"scope=all";
+    params addObject:@"fields=card";
+    params addObject:@"limit=100";
+    params addObject:@"sort=popular";
+    NSString *path = [NSString stringWithFormat:@"/stories?%@", [params componentsJoinedByString:@"&"]];
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:30.0];
     [self performRequest:request completion:completion];
 }
 
@@ -757,10 +456,10 @@ static const double kLumiLaneDeadline = 6.5;
 
 - (void)fetchChatsWithCompletion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:@"/chats"
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:30.0];
+                                                      path:@"/chats"
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:30.0];
     [self performRequest:request completion:^(id result, NSError *error) {
         if (error) {
             completion(result, error);
@@ -776,418 +475,76 @@ static const double kLumiLaneDeadline = 6.5;
 
 - (void)fetchChatWithID:(NSString *)chatID completion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:[NSString stringWithFormat:@"/chats/%@", chatID]
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:25.0];
-    [self performRequest:request completion:completion];
-}
-
-- (void)openChatWithCharacterID:(NSString *)characterID
-                        storyID:(NSString *)storyID
-                     completion:(LumiAPICompletion)completion {
-    NSMutableArray *bodies = [NSMutableArray array];
-    NSString *kind = characterID.length ? @"character" : @"story";
-    NSString *target = characterID.length ? characterID : storyID;
-    if (!target.length) {
-        completion(nil, LumiError(400, @"Не выбран персонаж"));
-        return;
-    }
-    if (characterID.length) {
-        [bodies addObject:@{@"character_id": characterID}];
-    } else {
-        [bodies addObject:@{@"story_id": storyID}];
-    }
-    [bodies addObject:@{@"target_kind": kind, @"target_id": target}];
-    [bodies addObject:@{@"kind": kind, @"target_id": target}];
-    [bodies addObject:@{@"target_type": kind, @"target_id": target}];
-    [self attemptOpenChatWithBodies:bodies index:0 completion:completion];
-}
-
-- (void)attemptOpenChatWithBodies:(NSArray<NSDictionary *> *)bodies
-                            index:(NSUInteger)index
-                       completion:(LumiAPICompletion)completion {
-    if (index >= bodies.count) {
-        completion(nil, LumiError(400, @"Не удалось открыть чат"));
-        return;
-    }
-    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                     path:@"/chats/open"
-                                                  baseURL:kAPIBaseURL
-                                                     body:bodies[index]
-                                                  timeout:40.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        if (!error) {
-            NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
-            NSDictionary *chat = dictionary[@"chat"];
-            if (![chat isKindOfClass:[NSDictionary class]]) {
-                chat = dictionary;
-            }
-            if ([chat[@"id"] isKindOfClass:[NSString class]]) {
-                completion(chat, nil);
-                return;
-            }
-        }
-        if (error.code == 401) {
-            completion(result, error);
-            return;
-        }
-        [self attemptOpenChatWithBodies:bodies index:index + 1 completion:completion];
-    }];
-}
-
-- (void)fetchMessagesForChatID:(NSString *)chatID
-                         limit:(NSInteger)limit
-                        before:(NSString *)before
-                    completion:(LumiAPICompletion)completion {
-    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages?limit=%ld", chatID, (long)limit];
-    if (before.length) {
-        path = [path stringByAppendingFormat:@"&before=%@", before];
-    }
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:path
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:40.0];
-    [self performRequest:request completion:completion];
-}
-
-- (void)markChatRead:(NSString *)chatID {
-    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                     path:[NSString stringWithFormat:@"/chats/%@/read", chatID]
-                                                  baseURL:kAPIBaseURL
-                                                     body:@{}
-                                                  timeout:20.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        if (error) {
-            NSLog(@"[Lumi] mark read failed: %@", error.localizedDescription);
-        }
-    }];
-}
-
-- (void)seedIntroForChat:(NSString *)chatID completion:(LumiAPICompletion)completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                     path:[NSString stringWithFormat:@"/chats/%@/seed-intro", chatID]
-                                                  baseURL:kAPIBaseURL
-                                                     body:@{}
-                                                  timeout:120.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        if (completion) {
-            completion(result, error);
-        }
-    }];
-}
-
-- (void)deleteChat:(NSString *)chatID completion:(LumiAPICompletion)completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"DELETE"
-                                                     path:[NSString stringWithFormat:@"/chats/%@", chatID]
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:25.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        if (completion) {
-            completion(result, error);
-        }
-    }];
-}
-
-- (LumiChatStream *)sendMessage:(NSString *)content
-                         chatID:(NSString *)chatID
-                   eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
-                     completion:(void (^)(NSError *))completion {
-    LumiChatStream *stream = [[LumiChatStream alloc] initWithChatID:chatID
-                                                            content:content
-                                                       eventHandler:eventHandler
-                                                         completion:completion];
-    [stream start];
-    return stream;
-}
-
-- (LumiChatStream *)regenerateMessageWithID:(NSString *)messageID
-                                     chatID:(NSString *)chatID
-                               eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
-                                 completion:(void (^)(NSError *))completion {
-    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages/%@/variants", chatID, messageID];
-    LumiChatStream *stream = [[LumiChatStream alloc] initWithChatID:chatID
-                                                               path:path
-                                                               body:@{}
-                                                       eventHandler:eventHandler
-                                                         completion:completion];
-    [stream start];
-    return stream;
-}
-
-- (void)editMessageWithID:(NSString *)messageID
-                   chatID:(NSString *)chatID
-                  content:(NSString *)content
-               completion:(LumiAPICompletion)completion {
-    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages/%@", chatID, messageID];
-    NSMutableURLRequest *request = [self requestWithMethod:@"PATCH"
-                                                     path:path
-                                                  baseURL:kAPIBaseURL
-                                                     body:@{@"content": content ?: @""}
-                                                  timeout:40.0];
-    [self performRequest:request completion:completion];
-}
-
-- (void)setActiveVariantIndex:(NSInteger)index
-                 forMessageID:(NSString *)messageID
-                       chatID:(NSString *)chatID
-                   completion:(LumiAPICompletion)completion {
-    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages/%@/active-variant", chatID, messageID];
-    NSMutableURLRequest *request = [self requestWithMethod:@"PATCH"
-                                                     path:path
-                                                  baseURL:kAPIBaseURL
-                                                     body:@{@"index": @(index)}
-                                                  timeout:30.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        if (completion) {
-            completion(result, error);
-        }
-    }];
-}
-
-- (void)deleteMessageWithID:(NSString *)messageID
-                 chatID:(NSString *)chatID
-             completion:(LumiAPICompletion)completion {
-    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages/%@", chatID, messageID];
-    NSMutableURLRequest *request = [self requestWithMethod:@"DELETE"
-                                                      path:path
+                                                      path:[NSString stringWithFormat:@"/chats/%@", chatID]
                                                    baseURL:kAPIBaseURL
                                                       body:nil
                                                    timeout:30.0];
     [self performRequest:request completion:completion];
 }
 
-- (void)forkChatFromMessageID:(NSString *)messageID
-                    chatID:(NSString *)chatID
-                completion:(LumiAPICompletion)completion {
-    NSString *path = [NSString stringWithFormat:@"/chats/%@/fork", chatID];
-    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                      path:path
-                                                   baseURL:kAPIBaseURL
-                                                      body:@{@"message_id": messageID}
-                                                   timeout:40.0];
-    [self performRequest:request completion:completion];
-}
-
 - (void)sendMessageToChatID:(NSString *)chatID
-                  content:(NSString *)content
-               isContinue:(BOOL)isContinue
-            completion:(LumiAPICompletion)completion {
-    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages", chatID];
-    NSMutableDictionary *body = [NSMutableDictionary dictionary];
-    body[@"content"] = content ?: @"";
-    if (isContinue) {
-        body[@"continue"] = @YES;
-    }
+                     content:(NSString *)content
+                    isContinue:(BOOL)isContinue
+                  completion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                      path:path
+                                                      path:[NSString stringWithFormat:@"/chats/%@/messages", chatID]
                                                    baseURL:kAPIBaseURL
-                                                      body:body
+                                                      body:@{@"content": content ?: @"", @"is_continue": @(isContinue)}
                                                    timeout:60.0];
     [self performRequest:request completion:completion];
 }
 
-- (void)fetchSparksWithCompletion:(LumiAPICompletion)completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:@"/me/sparks"
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:25.0];
+- (void)deleteChat:(NSString *)chatID completion:(LumiAPICompletion)completion {
+    NSMutableURLRequest *request = [self requestWithMethod:@"DELETE"
+                                                      path:[NSString stringWithFormat:@"/chats/%@", chatID]
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:30.0];
     [self performRequest:request completion:completion];
 }
 
-- (void)generateChatPhotoForChatID:(NSString *)chatID
-                           quality:(NSString *)quality
-                        completion:(LumiAPICompletion)completion {
-    NSMutableDictionary *body = [NSMutableDictionary dictionary];
-    if (quality.length) {
-        body[@"quality"] = quality;
-    }
-    body[@"request_id"] = [[NSUUID UUID] UUIDString];
+- (void)deleteMessageWithID:(NSString *)messageID completion:(LumiAPICompletion)completion {
+    NSMutableURLRequest *request = [self requestWithMethod:@"DELETE"
+                                                      path:[NSString stringWithFormat:@"/messages/%@", messageID]
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:30.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)forkChatFromMessageID:(NSString *)messageID completion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"POST"
-                                                     path:[NSString stringWithFormat:@"/chats/%@/photo", chatID]
-                                                  baseURL:kAPIBaseURL
-                                                     body:body
-                                                  timeout:180.0];
-    [self performRequest:request completion:^(id result, NSError *error) {
-        if (error) {
-            completion(result, error);
-            return;
-        }
-        NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
-        NSDictionary *message = [dictionary[@"message"] isKindOfClass:[NSDictionary class]] ? dictionary[@"message"] : dictionary;
-        completion(message ?: @{}, nil);
-    }];
+                                                      path:[NSString stringWithFormat:@"/messages/%@/fork", messageID]
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:30.0];
+    [self performRequest:request completion:completion];
 }
 
-@end
+#pragma mark - Chat streams
 
-#pragma mark - SSE stream
-
-@interface LumiChatStream () <NSURLSessionDataDelegate>
-@property (nonatomic, copy) NSString *chatID;
-@property (nonatomic, copy) NSString *content;
-@property (nonatomic, copy, nullable) NSString *path;
-@property (nonatomic, copy, nullable) NSDictionary *body;
-@property (nonatomic, copy) void (^eventHandler)(NSString *, NSDictionary *);
-@property (nonatomic, copy) void (^completion)(NSError *);
-@property (nonatomic, strong) NSURLSession *session;
-@property (nonatomic, strong, nullable) NSURLSessionDataTask *task;
-@property (nonatomic, strong) NSMutableData *buffer;
-@property (nonatomic, assign) BOOL finished;
-@property (nonatomic, assign) NSInteger errorStatus;
-@end
-
-@implementation LumiChatStream
-
-- (instancetype)initWithChatID:(NSString *)chatID
-                       content:(NSString *)content
-                  eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
-                    completion:(void (^)(NSError *))completion {
-    self = [super init];
-    if (self) {
-        _chatID = [chatID copy];
-        _content = [content copy];
-        _eventHandler = [eventHandler copy];
-        _completion = [completion copy];
-        _buffer = [NSMutableData data];
-    }
-    return self;
+- (void)openChatStreamWithID:(NSString *)chatID
+                      path:(NSString *)path
+                      body:(NSDictionary *)body
+                 eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
+                   completion:(void (^)(NSError *))completion {
+    LumiChatStream *stream = [[LumiChatStream alloc] initWithChatID:chatID
+                                                               path:path
+                                                               body:body
+                                                        eventHandler:eventHandler
+                                                      completion:completion];
+    [stream open];
 }
 
-- (instancetype)initWithChatID:(NSString *)chatID
-                          path:(NSString *)path
-                          body:(NSDictionary *)body
-                  eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
-                    completion:(void (^)(NSError *))completion {
-    self = [self initWithChatID:chatID content:@"" eventHandler:eventHandler completion:completion];
-    if (self) {
-        _path = [path copy];
-        _body = [body copy];
-    }
-    return self;
-}
-
-- (void)start {
-    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
-    configuration.timeoutIntervalForRequest = 120.0;
-    configuration.timeoutIntervalForResource = 300.0;
-    configuration.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    configuration.HTTPShouldSetCookies = YES;
-    self.session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
-
-    NSString *path = self.path.length ? self.path : [NSString stringWithFormat:@"/chats/%@/messages", self.chatID];
-    NSString *urlString = [kAPIBaseURL stringByAppendingString:LumiEncodePath(path)];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
-    request.HTTPMethod = @"POST";
-    request.timeoutInterval = 180.0;
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [request setValue:@"text/event-stream" forHTTPHeaderField:@"Accept"];
-    [request setValue:@"ru" forHTTPHeaderField:@"X-Lang"];
-    [request setValue:kWebOrigin forHTTPHeaderField:@"Origin"];
-    [request setValue:[kWebOrigin stringByAppendingString:@"/"] forHTTPHeaderField:@"Referer"];
-    [request setValue:@"ios-app" forHTTPHeaderField:@"X-Lumi-Client"];
-    NSString *token = [LumiAPI sharedClient].accessToken;
-    if (token.length) {
-        [request setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
-    }
-    NSDictionary *body = self.body ?: @{@"content": self.content ?: @""};
-    request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:NULL];
-    self.task = [self.session dataTaskWithRequest:request];
-    [self.task resume];
-}
-
-- (void)cancel {
-    [self finishWithError:nil];
-}
-
-- (void)finishWithError:(NSError *)error {
-    if (self.finished) {
-        return;
-    }
-    self.finished = YES;
-    [self.task cancel];
-    [self.session invalidateAndCancel];
-    void (^completion)(NSError *) = self.completion;
-    self.completion = nil;
-    self.eventHandler = nil;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (completion) {
-            completion(error);
-        }
-    });
-}
-
-- (void)URLSession:(NSURLSession *)session
-          dataTask:(NSURLSessionDataTask *)dataTask
-didReceiveResponse:(NSURLResponse *)response
- completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
-    NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
-    if ([http isKindOfClass:[NSHTTPURLResponse class]] && http.statusCode >= 400) {
-        self.errorStatus = http.statusCode;
-    }
-    completionHandler(NSURLSessionResponseAllow);
-}
-
-- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
-    [self.buffer appendData:data];
-    if (self.errorStatus == 0) {
-        [self drainBuffer];
-    }
-}
-
-- (void)drainBuffer {
-    while (YES) {
-        NSRange separator = [self.buffer rangeOfData:[@"\n\n" dataUsingEncoding:NSUTF8StringEncoding]
-                                             options:0
-                                               range:NSMakeRange(0, self.buffer.length)];
-        if (separator.location == NSNotFound) {
-            break;
-        }
-        NSData *chunk = [self.buffer subdataWithRange:NSMakeRange(0, separator.location)];
-        [self.buffer replaceBytesInRange:NSMakeRange(0, separator.location + separator.length) withBytes:NULL length:0];
-        NSString *text = [[NSString alloc] initWithData:chunk encoding:NSUTF8StringEncoding];
-        if (text.length) {
-            [self handleEventText:text];
-        }
-    }
-}
-
-- (void)handleEventText:(NSString *)text {
-    NSString *event = @"message";
-    NSMutableArray<NSString *> *dataLines = [NSMutableArray array];
-    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
-        if ([line hasPrefix:@"event:"]) {
-            event = [[line substringFromIndex:6] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        } else if ([line hasPrefix:@"data:"]) {
-            [dataLines addObject:[[line substringFromIndex:5] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]];
-        }
-    }
-    if (!dataLines.count) {
-        return;
-    }
-    NSData *jsonData = [[dataLines componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
-    id payload = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:NULL];
-    NSDictionary *dictionary = [payload isKindOfClass:[NSDictionary class]] ? payload : @{};
-    void (^handler)(NSString *, NSDictionary *) = self.eventHandler;
-    if (!handler) {
-        return;
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{
-        handler(event, dictionary);
-    });
-}
-
-- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    if (self.errorStatus > 0) {
-        id payload = self.buffer.length ? [NSJSONSerialization JSONObjectWithData:self.buffer options:0 error:NULL] : nil;
-        NSString *message = LumiMessageFromPayload(payload, @"Не удалось отправить сообщение");
-        [self finishWithError:LumiError(self.errorStatus, message)];
-        return;
-    }
-    [self finishWithError:error];
+- (void)openChatStreamWithID:(NSString *)chatID
+                     content:(NSString *)content
+                eventHandler:(void (^)(NSString *, NSDictionary *))eventHandler
+                  completion:(void (^)(NSError *))completion {
+    LumiChatStream *stream = [[LumiChatStream alloc] initWithChatID:chatID
+                                                           content:content
+                                                    eventHandler:eventHandler
+                                                      completion:completion];
+    [stream open];
 }
 
 @end
