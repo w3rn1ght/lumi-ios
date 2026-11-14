@@ -547,15 +547,18 @@ static NSString *LumiEncodePath(NSString *path) {
 
 #pragma mark - Catalog detail (off-main)
 
-/// Bulk catalog loading issues ~1000 requests. Two things make this different
-/// from the generic `performRequest:` path:
+/// Bulk catalog loading issues ~1000 requests. Three things make this
+/// different from the generic `performRequest:` path:
 ///
-/// 1. Every attempt gets its own ephemeral NSURLSession with a single
-///    connection and `Connection: close`. A stale/wedged HTTP/2 connection on
-///    the shared session used to hang the request forever and poison every
-///    later request multiplexed onto it.
-/// 2. The deadline is enforced by ourselves: when it fires we settle the
-///    request, tear the session down and retry on a *new* connection. We never
+/// 1. Every lane gets its own ephemeral NSURLSession with a single connection.
+///    A stale/wedged connection on the shared session used to hang a request
+///    forever and poison every later request multiplexed onto it.
+/// 2. Lanes are hedged: if the first connection has not answered after 2.5 s, a
+///    second one is opened in parallel and the first answer wins. Roughly 15%
+///    of connections to the API never answer at all, so waiting for them in
+///    line was what made the catalog crawl.
+/// 3. The deadline is enforced by ourselves: when it fires we settle the
+///    request, tear the sessions down and retry on a *new* connection. We never
 ///    depend on `[task cancel]` delivering a completion handler — it often
 ///    does not, which left workers stuck forever and stopped the whole sync.
 - (void)fetchCatalogDetailWithKind:(NSString *)kind
@@ -566,6 +569,16 @@ static NSString *LumiEncodePath(NSString *path) {
     [self catalogFetchKind:kind identifier:identifier attempt:0 completion:completion];
 }
 
+/// One attempt = up to two *hedged* lanes. The server randomly leaves ~15% of
+/// connections unanswered; on a fresh connection the same card answers in
+/// ~0.3 s. Waiting the full deadline for such a card wastes 10 s of a worker,
+/// so a second lane starts after `kLumiHedgeDelay` and the first answer wins.
+/// The loser is torn down immediately, and the overall deadline (6.5 s) is
+/// enforced by us — never by NSURLSession, whose completion handler is not
+/// guaranteed to fire for a wedged connection.
+static const double kLumiHedgeDelay = 2.5;
+static const double kLumiLaneDeadline = 6.5;
+
 - (void)catalogFetchKind:(NSString *)kind
               identifier:(NSString *)identifier
                  attempt:(NSUInteger)attempt
@@ -575,45 +588,29 @@ static NSString *LumiEncodePath(NSString *path) {
     }
 
     NSString *path = [NSString stringWithFormat:@"/public/%@/%@", kind, identifier];
-    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    configuration.timeoutIntervalForRequest = 10.0;
-    configuration.timeoutIntervalForResource = 10.0;
-    configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-    configuration.HTTPMaximumConnectionsPerHost = 1;
-    configuration.HTTPShouldUsePipelining = NO;
-    configuration.HTTPShouldSetCookies = NO;
-    configuration.HTTPCookieStorage = nil;
-    configuration.URLCache = nil;
-    configuration.HTTPAdditionalHeaders = @{
-        @"Accept": @"application/json",
-        @"Accept-Language": @"ru,en;q=0.8",
-        @"X-Lang": @"ru",
-        @"Origin": kWebOrigin,
-        @"Referer": [kWebOrigin stringByAppendingString:@"/"],
-        @"X-Lumi-Client": @"ios-app",
-        @"Connection": @"close",
-    };
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
-
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[kAPIBaseURL stringByAppendingString:path]]];
-    request.HTTPMethod = @"GET";
-    request.timeoutInterval = 10.0;
-    request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-    // Public catalog payloads never depend on the account: dropping the bearer
-    // token keeps the auth middleware out of a 1000-request crawl.
-    [request setValue:nil forHTTPHeaderField:@"Authorization"];
+    NSURL *url = [NSURL URLWithString:[kAPIBaseURL stringByAppendingString:path]];
+    if (!url) {
+        completion(nil, LumiError(400, @"Некорректный адрес карточки"));
+        return;
+    }
 
     NSObject *gate = [[NSObject alloc] init];
+    NSMutableArray<NSURLSession *> *sessions = [NSMutableArray arrayWithCapacity:2];
     __block BOOL settled = NO;
 
     void (^settle)(NSData *, NSURLResponse *, NSError *, BOOL) = ^(NSData *data, NSURLResponse *response, NSError *error, BOOL timedOut) {
+        NSArray<NSURLSession *> *doomed = nil;
         @synchronized (gate) {
             if (settled) {
                 return;
             }
             settled = YES;
+            doomed = [sessions copy];
+            [sessions removeAllObjects];
         }
-        [session invalidateAndCancel];
+        for (NSURLSession *session in doomed) {
+            [session invalidateAndCancel];
+        }
 
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         NSInteger status = http ? http.statusCode : 0;
@@ -626,10 +623,12 @@ static NSString *LumiEncodePath(NSString *path) {
             return;
         }
 
-        NSUInteger maxAttempts = 4;
+        // A card is retried up to 5 times; a permanently broken card cannot
+        // hold a worker forever.
+        NSUInteger maxAttempts = 5;
         BOOL retryable = timedOut || error != nil || status == 429 || status >= 500 || status == 0;
         if (retryable && attempt + 1 < maxAttempts) {
-            double delay = 0.25 + 0.35 * (double)attempt;
+            double delay = 0.2 + 0.3 * (double)attempt;
             if (status == 429) {
                 delay = (double)(1 << MIN(attempt, (NSUInteger)4));
             }
@@ -649,15 +648,62 @@ static NSString *LumiEncodePath(NSString *path) {
         completion(json, LumiError(status ?: (timedOut ? 408 : 500), message));
     };
 
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
-                                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        settle(data, response, error, NO);
-    }];
-    [task resume];
+    // Each lane gets its own ephemeral session so it always owns a brand-new
+    // TCP+TLS connection. Reusing the shared session is exactly what made a
+    // single wedged connection stall every later request.
+    void (^startLane)(void) = ^{
+        @synchronized (gate) {
+            if (settled) {
+                return;
+            }
+        }
+        NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        configuration.timeoutIntervalForRequest = kLumiLaneDeadline;
+        configuration.timeoutIntervalForResource = kLumiLaneDeadline;
+        configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        configuration.HTTPMaximumConnectionsPerHost = 1;
+        configuration.HTTPShouldUsePipelining = NO;
+        configuration.HTTPShouldSetCookies = NO;
+        configuration.HTTPCookieStorage = nil;
+        configuration.URLCache = nil;
+        configuration.HTTPAdditionalHeaders = @{
+            @"Accept": @"application/json",
+            @"Accept-Language": @"ru,en;q=0.8",
+            @"X-Lang": @"ru",
+            @"Origin": kWebOrigin,
+            @"Referer": [kWebOrigin stringByAppendingString:@"/"],
+            @"X-Lumi-Client": @"ios-app",
+        };
+        NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+        @synchronized (gate) {
+            if (settled) {
+                [session invalidateAndCancel];
+                return;
+            }
+            [sessions addObject:session];
+        }
 
-    // Hard deadline owned by us: settle + retry on a brand-new connection even
-    // if NSURLSession never calls the completion handler.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+        request.HTTPMethod = @"GET";
+        request.timeoutInterval = kLumiLaneDeadline;
+        request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        // Public catalog payloads never depend on the account: dropping the
+        // bearer token keeps the auth middleware out of a 1000-request crawl.
+        [request setValue:nil forHTTPHeaderField:@"Authorization"];
+
+        NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            settle(data, response, error, NO);
+        }];
+        [task resume];
+    };
+
+    startLane();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLumiHedgeDelay * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        startLane();
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLumiLaneDeadline * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         settle(nil, nil, nil, YES);
     });

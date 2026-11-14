@@ -705,13 +705,40 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
         __block NSUInteger completed = 0;
         __block NSUInteger inFlight = 0;
         __block NSUInteger rateLimited = 0;
-        const NSUInteger workers = 6;
+        __block NSUInteger errorLogs = 0;
+        __block NSUInteger failedCount = 0;
+        __block BOOL loggedFirstCard = NO;
+        const NSUInteger workers = 8;
         NSMutableArray<NSString *> *failedIDs = [NSMutableArray array];
         __block void (^pump)(void);
         __block __weak void (^weakPump)(void);
         NSTimeInterval passStartedAt = [NSDate timeIntervalSinceReferenceDate];
         [LumiDiagnostics log:@"каталог: старт %@ — %lu карточек, %lu воркеров",
          phase, (unsigned long)total, (unsigned long)workers];
+
+        // Heartbeat: proves workers are alive even when no card completes for a
+        // while (e.g. every connection hangs). It runs on its own queue so a
+        // wedged worker scheduler still shows up in the log as a silent one.
+        dispatch_queue_t pulseQueue = dispatch_queue_create("com.w3rn1ght.lumi.catalog.pulse", DISPATCH_QUEUE_SERIAL);
+        __block void (^heartbeat)(void);
+        __block __weak void (^weakHeartbeat)(void);
+        heartbeat = ^{
+            if (finished || completed >= total) {
+                return;
+            }
+            [LumiDiagnostics log:@"каталог: пульс — %lu/%lu, в работе %lu, ошибок %lu, %.0f с",
+             (unsigned long)completed, (unsigned long)total, (unsigned long)inFlight,
+             (unsigned long)failedCount,
+             [NSDate timeIntervalSinceReferenceDate] - passStartedAt];
+            void (^next)(void) = weakHeartbeat;
+            if (next) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                               pulseQueue, next);
+            }
+        };
+        weakHeartbeat = heartbeat;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                       pulseQueue, heartbeat);
 
         pump = ^{
             if (finished) {
@@ -742,10 +769,22 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                         inFlight -= 1;
                         if (ok) {
                             succeeded += 1;
+                            if (!loggedFirstCard) {
+                                loggedFirstCard = YES;
+                                [LumiDiagnostics log:@"каталог: первая карточка за %.1f с",
+                                 [NSDate timeIntervalSinceReferenceDate] - passStartedAt];
+                            }
                         } else {
+                            failedCount += 1;
                             [failedIDs addObject:identifier];
                             if (error.code == 429) {
                                 rateLimited += 1;
+                            }
+                            if (errorLogs < 5) {
+                                errorLogs += 1;
+                                [LumiDiagnostics log:@"каталог: карточка %@ — %@",
+                                 [identifier substringToIndex:MIN((NSUInteger)8, identifier.length)],
+                                 error.localizedDescription ?: @"нет ответа"];
                             }
                         }
 
@@ -772,11 +811,11 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                                     [strongSelf saveCache];
                                 });
                             }
-                            if (completed % 100 == 0) {
+                            if (completed % 25 == 0) {
                                 NSTimeInterval elapsed = [NSDate timeIntervalSinceReferenceDate] - passStartedAt;
                                 [LumiDiagnostics log:@"каталог: %lu/%lu за %.0f с, ошибок %lu",
                                  (unsigned long)completed, (unsigned long)total, elapsed,
-                                 (unsigned long)failedIDs.count];
+                                 (unsigned long)failedCount];
                             }
                         }
 
