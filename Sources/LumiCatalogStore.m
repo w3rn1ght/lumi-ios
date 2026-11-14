@@ -514,6 +514,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSMutableArray *allCharacters = [NSMutableArray array];
     __weak typeof(self) weakSelf = self;
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-retain-cycles"
     __block void (^fetchPage)(NSString * _Nullable) = nil;
     fetchPage = ^(NSString * _Nullable cursor) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -564,6 +566,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
         }];
     };
+#pragma clang diagnostic pop
+
 
     fetchPage(nil);
 }
@@ -576,6 +580,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSMutableArray *allStories = [NSMutableArray array];
     __weak typeof(self) weakSelf = self;
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-retain-cycles"
     __block void (^fetchPage)(NSString * _Nullable) = nil;
     fetchPage = ^(NSString * _Nullable cursor) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -626,6 +632,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
         }];
     };
+#pragma clang diagnostic pop
+
 
     fetchPage(nil);
 }
