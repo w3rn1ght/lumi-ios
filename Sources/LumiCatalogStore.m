@@ -11,6 +11,13 @@ static const NSUInteger kDetailConcurrency = 14;
 static const NSUInteger kDetailInitialWorkers = 10;
 static const NSUInteger kDetailMinimumWorkers = 3;
 
+/// Local error helper (LumiError is private to LumiAPI.m).
+static NSError *LumiCatalogError(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:LumiAPIErrorDomain
+                                code:code
+                            userInfo:@{NSLocalizedDescriptionKey: message ?: @"Ошибка"}];
+}
+
 typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     LumiCatalogSyncKindCharacter = 0,
     LumiCatalogSyncKindStory = 1,
@@ -548,18 +555,14 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     void (^fetchPage)(void) = ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
-            completion(nil, LumiError(500, @"Синхронизация отменена"));
+            completion(nil, LumiCatalogError(500, @"Синхронизация отменена"));
             return;
         }
         
-        [strongSelf.api fetchCatalogCardsWithKind:kind
-                                            cursor:cursor
-                                             limit:100
-                                             scope:@"all"
-                                        completion:^(id result, NSError *error) {
+        void (^fetchCompletion)(id, NSError *) = ^(id result, NSError *error) {
             __strong typeof(weakSelf) sSelf = weakSelf;
             if (!sSelf) {
-                completion(nil, LumiError(500, @"Синхронизация отменена"));
+                completion(nil, LumiCatalogError(500, @"Синхронизация отменена"));
                 return;
             }
             
@@ -571,7 +574,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
             NSArray *items = [dictionary[@"items"] isKindOfClass:[NSArray class]] ? dictionary[@"items"] : nil;
             if (!items) {
-                completion(nil, LumiError(500, @"Некорректный ответ сервера"));
+                completion(nil, LumiCatalogError(500, @"Некорректный ответ сервера"));
                 return;
             }
             
@@ -591,7 +594,15 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             } else {
                 completion([allCards copy], nil);
             }
-        }];
+        };
+        
+        if ([kind isEqualToString:@"characters"]) {
+            [strongSelf.api fetchCharacterCardsWithCursor:cursor limit:100 completion:fetchCompletion];
+        } else if ([kind isEqualToString:@"stories"]) {
+            [strongSelf.api fetchStoryCardsWithCursor:cursor limit:100 completion:fetchCompletion];
+        } else {
+            completion(nil, LumiCatalogError(500, @"Неизвестный тип каталога"));
+        }
     };
     
     fetchPage();
@@ -1015,7 +1026,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             if (member[@"id"]) {
                 cleaned[@"id"] = member[@"id"];
             }
-            if (member[@-"name"]) {
+            if (member[@"name"]) {
                 cleaned[@"name"] = member[@"name"];
             }
             if (member[@"avatar_url"]) {
@@ -1174,6 +1185,44 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
                         tags:@[]
              primaryKeyName:@"title"
            secondaryKeyName:@"description"];
+}
+
+- (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query
+                                                 tags:(NSArray<NSString *> *)tags {
+    return [self filterItems:self.characters
+                       query:query
+                        tags:tags
+             primaryKeyName:@"name"
+           secondaryKeyName:@"tagline"];
+}
+
+- (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query
+                                              tags:(NSArray<NSString *> *)tags {
+    return [self filterItems:self.stories
+                       query:query
+                        tags:tags
+             primaryKeyName:@"title"
+           secondaryKeyName:@"description"];
+}
+
+- (nullable NSDictionary *)characterWithID:(nullable NSString *)identifier {
+    if (!identifier.length) return nil;
+    for (NSDictionary *character in self.characters) {
+        if ([character[@"id"] isEqual:identifier]) {
+            return character;
+        }
+    }
+    return nil;
+}
+
+- (nullable NSDictionary *)storyWithID:(nullable NSString *)identifier {
+    if (!identifier.length) return nil;
+    for (NSDictionary *story in self.stories) {
+        if ([story[@"id"] isEqual:identifier]) {
+            return story;
+        }
+    }
+    return nil;
 }
 
 @end
