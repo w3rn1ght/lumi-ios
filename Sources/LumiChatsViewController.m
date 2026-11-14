@@ -349,7 +349,10 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     [super viewWillAppear:animated];
     [self updateLoginState];
     if ([[LumiAPI sharedClient] isAuthenticated] && !self.loading) {
-        [self loadChats];
+        LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+        if (!store.isSyncing) {
+            [self loadChats];
+        }
     }
 }
 
@@ -363,7 +366,10 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self updateLoginState];
         if ([[LumiAPI sharedClient] isAuthenticated]) {
-            [self loadChats];
+            LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+            if (!store.isSyncing) {
+                [self loadChats];
+            }
         }
     });
 }
@@ -376,7 +382,9 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 
 - (void)catalogDidUpdate {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if ([[LumiAPI sharedClient] isAuthenticated] && !self.loading) {
+        LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+        // Only reload chats when catalog sync is fully complete (not during incremental page loads)
+        if ([[LumiAPI sharedClient] isAuthenticated] && !self.loading && !store.isSyncing) {
             [self loadChats];
         }
     });
@@ -474,6 +482,11 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     if (![[LumiAPI sharedClient] isAuthenticated]) {
         [self.tableView.refreshControl endRefreshing];
         [self updateLoginState];
+        return;
+    }
+    LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    if (store.isSyncing) {
+        [self.tableView.refreshControl endRefreshing];
         return;
     }
     [self loadChats];

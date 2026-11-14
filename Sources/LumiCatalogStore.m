@@ -530,6 +530,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
 
             if (error) {
+                NSLog(@"[Lumi] catalog: character fetch error — %@", error);
                 [strongSelf2 failSyncWithError:error fallback:@"Не удалось загрузить персонажей"];
                 return;
             }
@@ -539,8 +540,13 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             if ([result isKindOfClass:[NSDictionary class]]) {
                 items = result[@"items"];
                 nextCursor = result[@"next_cursor"];
+                NSLog(@"[Lumi] catalog: fetched character page — items: %lu, next_cursor: %@",
+                      (unsigned long)(items ? items.count : 0), nextCursor ?: @"(null)");
             } else if ([result isKindOfClass:[NSArray class]]) {
                 items = result;
+                NSLog(@"[Lumi] catalog: fetched character page (array) — items: %lu", (unsigned long)items.count);
+            } else {
+                NSLog(@"[Lumi] catalog: unexpected character response type: %@", [result class]);
             }
 
             if ([items isKindOfClass:[NSArray class]] && items.count > 0) {
@@ -596,6 +602,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             }
 
             if (error) {
+                NSLog(@"[Lumi] catalog: story fetch error — %@", error);
                 [strongSelf2 failSyncWithError:error fallback:@"Не удалось загрузить истории"];
                 return;
             }
@@ -605,8 +612,13 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
             if ([result isKindOfClass:[NSDictionary class]]) {
                 items = result[@"items"];
                 nextCursor = result[@"next_cursor"];
+                NSLog(@"[Lumi] catalog: fetched story page — items: %lu, next_cursor: %@",
+                      (unsigned long)(items ? items.count : 0), nextCursor ?: @"(null)");
             } else if ([result isKindOfClass:[NSArray class]]) {
                 items = result;
+                NSLog(@"[Lumi] catalog: fetched story page (array) — items: %lu", (unsigned long)items.count);
+            } else {
+                NSLog(@"[Lumi] catalog: unexpected story response type: %@", [result class]);
             }
 
             if ([items isKindOfClass:[NSArray class]] && items.count > 0) {

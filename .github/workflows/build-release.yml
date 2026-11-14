@@ -1,0 +1,74 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Theos dependencies
+        run: |
+          brew install ldid wget dpkg
+
+      - name: Install Theos
+        run: |
+          git clone --depth=1 https://github.com/theos/theos.git /opt/theos
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+          echo "/opt/theos/bin" >> $GITHUB_PATH
+
+      - name: Setup iOS 12 SDK (use latest SDK with deployment target 12.0)
+        run: |
+          # Theos will use the available SDK; we just need to ensure deployment target is 12.0
+          # The Makefile TARGET=iphone:clang:12.4:12.0 sets deployment target to 12.0
+          xcodebuild -showsdks
+
+      - name: Build project
+        working-directory: ./lumi-ios
+        env:
+          THEOS: /opt/theos
+          THEOS_DEVICE_IP: ""
+        run: |
+          make clean
+          make package
+
+      - name: Find .deb package
+        id: deb
+        working-directory: ./lumi-ios
+        run: |
+          DEB_FILE=$(ls -1 *.deb 2>/dev/null | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "No .deb file found"
+            exit 1
+          fi
+          echo "deb_file=$DEB_FILE" >> $GITHUB_OUTPUT
+          echo "Found: $DEB_FILE"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Lumi ${{ github.ref_name }}
+          body: |
+            Native API client for Lumi.ai, built for jailbroken iOS 12+ devices.
+            
+            **Changes in this release:**
+            - Full catalog loading fix (cursor pagination debug logging)
+            - Character names now resolve correctly in chat groups
+            - Chat groups ordered by most recent activity (newest first)
+            - Swipe actions: Delete chat, New chat with same character
+            - Long-press message menu: Delete, Fork from message, Continue dialog, New chat with same character, Copy, Edit/Regenerate
+            - Hidden tab bar in chat view
+          files: ./lumi-ios/${{ steps.deb.outputs.deb_file }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
