@@ -473,6 +473,8 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
             _chatTitle = LumiAsString(safeItem[@"name"]) ?: LumiAsString(_chat[@"title"]);
         }
         _avatarURL = LumiAsString(safeItem[@"avatar_url"]);
+        // Скрываем tab bar (Каталог/Чаты/Профиль) в экране чата
+        self.hidesBottomBarWhenPushed = YES;
     }
     return self;
 }
@@ -1289,6 +1291,43 @@ static const NSInteger kLumiPhotoSparkCost = 10;
             [weakSelf regenerateMessageWithID:messageID];
         }]];
     }
+
+    // Удалить сообщение
+    if (messageID.length && !pending) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Удалить сообщение"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *action) {
+            [weakSelf deleteMessageWithID:messageID atRow:row];
+        }]];
+    }
+
+    // Новый чат от этого сообщения (fork)
+    if (messageID.length && !pending) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Новый чат от этого сообщения"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+            [weakSelf forkChatFromMessageID:messageID];
+        }]];
+    }
+
+    // Продолжить диалог (персонаж отвечает без сообщения пользователя)
+    if (!isUser && !pending && !self.sending && !self.loading) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Продолжить диалог"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+            [weakSelf continueDialog];
+        }]];
+    }
+
+    // Новый чат с тем же персонажем
+    if (!self.sending && !self.loading) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Новый чат с этим персонажем"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+            [weakSelf startNewChatWithSameCharacter];
+        }]];
+    }
+
     if (content.length) {
         [sheet addAction:[UIAlertAction actionWithTitle:@"Копировать"
                                                   style:UIAlertActionStyleDefault
@@ -1591,6 +1630,202 @@ static const NSInteger kLumiPhotoSparkCost = 10;
         [weakSelf stepVariantForRow:row delta:delta];
     };
     return cell;
+}
+
+#pragma mark - New Chat Actions
+
+- (void)deleteMessageWithID:(NSString *)messageID atRow:(NSInteger)row {
+    if (!messageID.length || !self.chatID.length) {
+        return;
+    }
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Удалить сообщение"
+                                                                   message:@"Это действие нельзя отменить. Сообщение будет удалено навсегда."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Удалить" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [weakSelf performDeleteMessage:messageID atRow:row];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)performDeleteMessage:(NSString *)messageID atRow:(NSInteger)row {
+    self.sending = YES;
+    self.sendButton.enabled = NO;
+    self.sendButton.alpha = 0.5;
+    
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] deleteMessageWithID:messageID chatID:self.chatID completion:^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        strongSelf.sending = NO;
+        strongSelf.sendButton.enabled = YES;
+        strongSelf.sendButton.alpha = 1.0;
+        
+        if (error) {
+            [LumiDiagnostics log:@"чат %@: удаление сообщения не удалось — %@", strongSelf.chatID, error.localizedDescription];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось удалить"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        // Удаляем сообщение локально
+        if (row >= 0 && row < (NSInteger)strongSelf.messages.count) {
+            [strongSelf.messages removeObjectAtIndex:row];
+            [strongSelf.tableView deleteRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:row inSection:0]]
+                                          withRowAnimation:UITableViewRowAnimationAutomatic];
+        }
+        [LumiDiagnostics log:@"чат %@: сообщение %@ удалено", strongSelf.chatID, messageID];
+    }];
+}
+
+- (void)forkChatFromMessageID:(NSString *)messageID {
+    if (!messageID.length || !self.chatID.length) {
+        return;
+    }
+    
+    // Находим сообщение и получаем его контент для контекста
+    NSDictionary *message = nil;
+    for (NSDictionary *msg in self.messages) {
+        if ([LumiStringValue(msg[@"id"]) isEqualToString:messageID]) {
+            message = msg;
+            break;
+        }
+    }
+    if (!message) return;
+    
+    NSString *content = LumiStringValue(message[@"content"]);
+    NSString *targetID = self.chat[@"target_id"] ?: self.chat[@"character_id"] ?: self.chat[@"story_id"];
+    NSString *kind = self.chat[@"target_kind"] ?: self.chat[@"kind"];
+    LumiDetailKind detailKind = ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"])
+        ? LumiDetailKindStory : LumiDetailKindCharacter;
+    NSDictionary *item = @{@"id": targetID,
+                           @"name": self.chatTitle,
+                           @"avatar_url": self.avatarURL};
+    
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] forkChatFromMessageID:messageID chatID:self.chatID completion:^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        if (error || ![result isKindOfClass:[NSDictionary class]]) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось создать чат"
+                                                                           message:error.localizedDescription ?: @"Сервер не вернул данные чата"
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        NSDictionary *chat = result[@"chat"] ?: result;
+        LumiChatViewController *controller = [[LumiChatViewController alloc] initWithChat:chat item:item kind:detailKind];
+        [strongSelf.navigationController pushViewController:controller animated:YES];
+    }];
+}
+
+- (void)continueDialog {
+    if (self.sending || self.loading || !self.chatID.length) {
+        return;
+    }
+    
+    // Отправляем пустое сообщение для триггера ответа персонажа
+    self.sending = YES;
+    self.sendButton.enabled = NO;
+    self.sendButton.alpha = 0.5;
+    self.inputField.enabled = NO;
+    
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] sendMessageToChatID:self.chatID
+                                         content:@""
+                                        isContinue:YES
+                                     completion:^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        strongSelf.sending = NO;
+        strongSelf.sendButton.enabled = YES;
+        strongSelf.sendButton.alpha = 1.0;
+        strongSelf.inputField.enabled = YES;
+        
+        if (error) {
+            [LumiDiagnostics log:@"чат %@: продолжение диалога не удалось — %@", strongSelf.chatID, error.localizedDescription];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось продолжить"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        // Перезагружаем сообщения
+        [strongSelf loadMessages];
+        [LumiDiagnostics log:@"чат %@: диалог продолжен", strongSelf.chatID];
+    }];
+}
+
+- (void)startNewChatWithSameCharacter {
+    if (!self.chatID.length) {
+        return;
+    }
+    
+    NSString *targetID = self.chat[@"target_id"] ?: self.chat[@"character_id"] ?: self.chat[@"story_id"];
+    NSString *kind = self.chat[@"target_kind"] ?: self.chat[@"kind"];
+    if (!targetID.length || !kind.length) {
+        return;
+    }
+    
+    NSDictionary *item = @{@"id": targetID,
+                           @"name": self.chatTitle,
+                           @"avatar_url": self.avatarURL};
+    
+    LumiDetailKind detailKind = ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"])
+        ? LumiDetailKindStory : LumiDetailKindCharacter;
+    
+    // Показываем индикатор загрузки
+    self.sending = YES;
+    self.sendButton.enabled = NO;
+    self.sendButton.alpha = 0.5;
+    self.inputField.enabled = NO;
+    [self.spinner startAnimating];
+    self.stateLabel.text = @"Создаю новый чат...";
+    
+    __weak typeof(self) weakSelf = self;
+    LumiAPICompletion completion = ^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        strongSelf.sending = NO;
+        strongSelf.sendButton.enabled = YES;
+        strongSelf.sendButton.alpha = 1.0;
+        strongSelf.inputField.enabled = YES;
+        [strongSelf.spinner stopAnimating];
+        strongSelf.stateLabel.text = nil;
+        
+        if (error || ![result isKindOfClass:[NSDictionary class]]) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось открыть чат"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        NSDictionary *chat = result;
+        LumiChatViewController *controller = [[LumiChatViewController alloc] initWithChat:chat item:item kind:detailKind];
+        [strongSelf.navigationController pushViewController:controller animated:YES];
+    };
+    
+    LumiAPI *api = [LumiAPI sharedClient];
+    if (detailKind == LumiDetailKindStory) {
+        [api openChatWithCharacterID:nil storyID:targetID completion:completion];
+    } else {
+        [api openChatWithCharacterID:targetID storyID:nil completion:completion];
+    }
 }
 
 @end

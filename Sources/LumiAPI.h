@@ -110,6 +110,22 @@ extern NSString *const LumiAuthDidChangeNotification;
                        chatID:(NSString *)chatID
                    completion:(nullable LumiAPICompletion)completion;
 
+/// DELETE /chats/{chatID}/messages/{messageID}
+- (void)deleteMessageWithID:(NSString *)messageID
+                 chatID:(NSString *)chatID
+             completion:(LumiAPICompletion)completion;
+
+/// POST /chats/{chatID}/fork - создает новый чат от конкретного сообщения
+- (void)forkChatFromMessageID:(NSString *)messageID
+                    chatID:(NSString *)chatID
+                completion:(LumiAPICompletion)completion;
+
+/// Отправка сообщения с флагом continue (пустое сообщение для триггера ответа ИИ)
+- (void)sendMessageToChatID:(NSString *)chatID
+                  content:(NSString *)content
+               isContinue:(BOOL)isContinue
+            completion:(LumiAPICompletion)completion;
+
 #pragma mark - Sparks & photos
 
 /// GET /me/sparks -> { balance, tariffs }.

@@ -947,6 +947,48 @@ static const double kLumiLaneDeadline = 6.5;
     }];
 }
 
+- (void)deleteMessageWithID:(NSString *)messageID
+                 chatID:(NSString *)chatID
+             completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages/%@", chatID, messageID];
+    NSMutableURLRequest *request = [self requestWithMethod:@"DELETE"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:nil
+                                                   timeout:30.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)forkChatFromMessageID:(NSString *)messageID
+                    chatID:(NSString *)chatID
+                completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/chats/%@/fork", chatID];
+    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:@{@"message_id": messageID}
+                                                   timeout:40.0];
+    [self performRequest:request completion:completion];
+}
+
+- (void)sendMessageToChatID:(NSString *)chatID
+                  content:(NSString *)content
+               isContinue:(BOOL)isContinue
+            completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/chats/%@/messages", chatID];
+    NSMutableDictionary *body = [NSMutableDictionary dictionary];
+    body[@"content"] = content ?: @"";
+    if (isContinue) {
+        body[@"continue"] = @YES;
+    }
+    NSMutableURLRequest *request = [self requestWithMethod:@"POST"
+                                                      path:path
+                                                   baseURL:kAPIBaseURL
+                                                      body:body
+                                                   timeout:60.0];
+    [self performRequest:request completion:completion];
+}
+
 - (void)fetchSparksWithCompletion:(LumiAPICompletion)completion {
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                      path:@"/me/sparks"
