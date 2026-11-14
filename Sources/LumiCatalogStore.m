@@ -514,7 +514,8 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSMutableArray *allCharacters = [NSMutableArray array];
     __weak typeof(self) weakSelf = self;
 
-    __block void (^fetchPage)(NSString * _Nullable) = ^(NSString * _Nullable cursor) {
+    __block void (^fetchPage)(NSString * _Nullable) = nil;
+    fetchPage = ^(NSString * _Nullable cursor) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
             return;
@@ -576,13 +577,14 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSMutableArray *allStories = [NSMutableArray array];
     __weak typeof(self) weakSelf = self;
 
-    __block void (^fetchPage)(NSString * _Nullable) = ^(NSString * _Nullable cursor) {
+    __block void (^fetchPage)(NSString * _Nullable) = nil;
+    fetchPage = ^(NSString * _Nullable cursor) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
             return;
         }
-
         __weak typeof(fetchPage) weakFetchPage = fetchPage;
+
         [strongSelf.api fetchStoryCardsWithCursor:cursor completion:^(id result, NSError *error) {
             __strong typeof(weakSelf) strongSelf2 = weakSelf;
             if (!strongSelf2) {
