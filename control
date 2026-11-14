@@ -1,4 +1,5 @@
 [build-17]
+Package: lumi
 Version: 1.4.9
 MinimumOSVersion: 12.0
 Description: Lumi for iOS 12.
