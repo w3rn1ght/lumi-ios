@@ -260,6 +260,21 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 
 @implementation LumiChatsViewController
 
+- (NSDate *)parseDate:(NSString *)string {
+    static NSISO8601DateFormatter *formatter;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        formatter = [[NSISO8601DateFormatter alloc] init];
+        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
+    });
+    NSDate *date = [formatter dateFromString:string];
+    if (date) {
+        return date;
+    }
+    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
+    return [formatter dateFromString:string];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = LumiBackgroundColor();
