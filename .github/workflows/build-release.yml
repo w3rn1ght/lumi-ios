@@ -23,22 +23,19 @@ jobs:
 
       - name: Install Theos
         run: |
-          git clone --depth=1 https://github.com/theos/theos.git /opt/theos
-          echo "THEOS=/opt/theos" >> $GITHUB_ENV
-          echo "/opt/theos/bin" >> $GITHUB_PATH
+          git clone --depth=1 https://github.com/theos/theos.git $HOME/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "$HOME/theos/bin" >> $GITHUB_PATH
 
-      - name: Setup iOS 12 SDK (use latest SDK with deployment target 12.0)
+      - name: Setup iOS SDK (use latest SDK with deployment target 12.0)
         run: |
-          # Theos will use the available SDK; we just need to ensure deployment target is 12.0
-          # The Makefile TARGET=iphone:clang:12.4:12.0 sets deployment target to 12.0
           xcodebuild -showsdks
 
       - name: Build project
         working-directory: ./lumi-ios
         env:
-          THEOS: /opt/theos
+          THEOS: ${{ env.THEOS }}
           THEOS_DEVICE_IP: ""
-          # Use latest SDK but target iOS 12.0 (GitHub runners don't have iOS 12 SDK)
           TARGET: iphone:clang:latest:12.0
         run: |
           make clean
