@@ -112,6 +112,12 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
 @property (nonatomic, strong) UILabel *aboutLabel;
 @property (nonatomic, strong) UILabel *tagsLabel;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
+- (void)render;
+- (void)loadDetail;
+- (void)loadChat;
+- (UILabel *)labelWithText:(NSString *)text color:(UIColor *)color font:(UIFont *)font;
+- (UILabel *)sectionTitleWithText:(NSString *)text;
+- (UILabel *)bodyLabel;
 @end
 
 @implementation LumiChatInfoViewController

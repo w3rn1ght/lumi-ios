@@ -127,6 +127,9 @@ static UIImage *LumiCircleImage(UIColor *color, CGFloat diameter, BOOL bordered)
 @property (nonatomic, strong) UIView *previewHeader;
 @property (nonatomic, strong) UILabel *previewLabel;
 @property (nonatomic, copy) NSArray<NSString *> *keys;
+- (void)buildPreviewHeader;
+- (void)refreshPreview;
+- (void)appearanceChanged;
 @end
 
 @implementation LumiChatAppearanceViewController

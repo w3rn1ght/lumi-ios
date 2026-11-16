@@ -25,6 +25,10 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
 @property (nonatomic, copy, readwrite) NSString *presetName;
 @property (nonatomic, assign, readwrite) BOOL isCustom;
 @property (nonatomic, assign) BOOL applyingPreset;
+- (void)loadStoredColors;
+- (void)save;
+- (void)storeColor:(UIColor *)color key:(NSString *)key;
+- (void)notifyChange;
 @end
 
 @implementation LumiChatAppearance
@@ -213,6 +217,10 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
     [defaults setObject:colors forKey:kLumiAppearanceColorsKey];
     [defaults setObject:self.presetName ?: kLumiDefaultPreset forKey:kLumiAppearancePresetKey];
     [defaults setBool:self.isCustom forKey:kLumiAppearanceCustomKey];
+}
+
+- (UIColor *)colorForKey:(NSString *)key {
+    return self.colors[key];
 }
 
 - (NSString *)hexStringForKey:(NSString *)key {

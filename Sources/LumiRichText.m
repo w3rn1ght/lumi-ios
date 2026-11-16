@@ -14,6 +14,16 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
     return [UIColor colorWithRed:0.086 green:0.196 blue:0.122 alpha:1.0];
 }
 
+@interface LumiRichTextRenderer ()
++ (NSRange)leadingBoldNameRangeInString:(NSString *)string;
++ (UIFont *)displayFontForBaseFont:(UIFont *)baseFont;
++ (NSAttributedString *)renderInlineText:(NSString *)text
+                               textColor:(UIColor *)textColor
+                                baseFont:(UIFont *)baseFont
+                               boldColor:(UIColor *)boldColor;
++ (NSAttributedString *)plainString:(NSString *)text font:(UIFont *)font color:(UIColor *)color;
+@end
+
 @implementation LumiRichTextRenderer
 
 + (NSArray<NSString *> *)imageURLsInText:(NSString *)text {
