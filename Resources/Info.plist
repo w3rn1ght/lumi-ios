@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.5.3</string>
+	<string>1.5.4</string>
 	<key>CFBundleVersion</key>
-	<string>20</string>
+	<string>21</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -388,13 +388,13 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Камера нужна для загрузки фотографий в чат Lumi.</string>
+	<string>РљР°РјРµСЂР° РЅСѓР¶РЅР° РґР»СЏ Р·Р°РіСЂСѓР·РєРё С„РѕС‚РѕРіСЂР°С„РёР№ РІ С‡Р°С‚ Lumi.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Микрофон может использоваться для голосовых сообщений на сайте Lumi.</string>
+	<string>РњРёРєСЂРѕС„РѕРЅ РјРѕР¶РµС‚ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊСЃСЏ РґР»СЏ РіРѕР»РѕСЃРѕРІС‹С… СЃРѕРѕР±С‰РµРЅРёР№ РЅР° СЃР°Р№С‚Рµ Lumi.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Доступ к фото нужен для загрузки изображений и аватаров в Lumi.</string>
+	<string>Р”РѕСЃС‚СѓРї Рє С„РѕС‚Рѕ РЅСѓР¶РµРЅ РґР»СЏ Р·Р°РіСЂСѓР·РєРё РёР·РѕР±СЂР°Р¶РµРЅРёР№ Рё Р°РІР°С‚Р°СЂРѕРІ РІ Lumi.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Сохранение изображений из Lumi в фотоплёнку.</string>
+	<string>РЎРѕС…СЂР°РЅРµРЅРёРµ РёР·РѕР±СЂР°Р¶РµРЅРёР№ РёР· Lumi РІ С„РѕС‚РѕРїР»С‘РЅРєСѓ.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

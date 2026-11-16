@@ -4,6 +4,7 @@
 #import "LumiCatalogStore.h"
 #import "LumiImageLoader.h"
 #import "LumiLoginViewController.h"
+#import "LumiSafe.h"
 #import "LumiTheme.h"
 
 @interface LumiProfileViewController ()
@@ -84,7 +85,12 @@
 
     UILabel *version = [[UILabel alloc] init];
     version.translatesAutoresizingMaskIntoConstraints = NO;
-    version.text = @"Lumi 1.4.8 · нативный клиент";
+    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
+    NSString *shortVersion = LumiAsString(info[@"CFBundleShortVersionString"]) ?: @"?";
+    NSString *build = LumiAsString(info[@"CFBundleVersion"]);
+    version.text = build.length
+        ? [NSString stringWithFormat:@"Lumi %@ (%@) · нативный клиент", shortVersion, build]
+        : [NSString stringWithFormat:@"Lumi %@ · нативный клиент", shortVersion];
     version.textColor = LumiMutedColor();
     version.font = LumiFont(12.0, UIFontWeightRegular);
     version.textAlignment = NSTextAlignmentCenter;

@@ -179,20 +179,22 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 }
 
 - (NSDate *)dateFromChat:(NSDictionary *)chat {
-    NSString *candidates[5];
-    NSUInteger count = 0;
-    for (NSString *key in @[@"last_message_at", @"updated_at", @"last_activity_at", @"created_at"]) {
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    for (NSString *key in @[@"last_message_at", @"last_activity_at", @"updated_at", @"created_at"]) {
         NSString *value = LumiAsString(LumiValue(chat, key));
         if (value.length) {
-            candidates[count++] = value;
+            [candidates addObject:value];
         }
     }
-    NSString *nested = LumiNestedString(chat, @"last_message", @"created_at");
-    if (nested.length) {
-        candidates[count++] = nested;
+    id lastMessage = LumiValue(chat, @"last_message") ?: LumiValue(chat, @"lastMessage");
+    for (NSString *key in @[@"created_at", @"sent_at", @"updated_at"]) {
+        NSString *value = LumiAsString(LumiValue(lastMessage, key));
+        if (value.length) {
+            [candidates addObject:value];
+        }
     }
-    for (NSUInteger index = 0; index < count; index++) {
-        NSDate *date = [self parseDate:candidates[index]];
+    for (NSString *candidate in candidates) {
+        NSDate *date = [self parseDate:candidate];
         if (date) {
             return date;
         }
@@ -201,18 +203,7 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 }
 
 - (NSDate *)parseDate:(NSString *)string {
-    static NSISO8601DateFormatter *formatter;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        formatter = [[NSISO8601DateFormatter alloc] init];
-        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
-    });
-    NSDate *date = [formatter dateFromString:string];
-    if (date) {
-        return date;
-    }
-    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
-    return [formatter dateFromString:string];
+    return LumiDateFromValue(string);
 }
 
 - (NSString *)relativeStringFromDate:(NSDate *)date {
@@ -256,23 +247,41 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 @property (nonatomic, strong) NSArray<LumiChatGroup *> *chatGroups; // сгруппированные чаты
 @property (nonatomic, assign) BOOL loading;
 - (NSDate *)parseDate:(NSString *)string;
+- (NSDate *)lastActivityDateFromChat:(NSDictionary *)chat;
+- (void)resolveMissingNames;
 @end
 
 @implementation LumiChatsViewController
 
 - (NSDate *)parseDate:(NSString *)string {
-    static NSISO8601DateFormatter *formatter;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        formatter = [[NSISO8601DateFormatter alloc] init];
-        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
-    });
-    NSDate *date = [formatter dateFromString:string];
-    if (date) {
-        return date;
+    return LumiDateFromValue(string);
+}
+
+- (NSDate *)lastActivityDateFromChat:(NSDictionary *)chat {
+    if (![chat isKindOfClass:[NSDictionary class]]) {
+        return nil;
     }
-    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
-    return [formatter dateFromString:string];
+    NSMutableArray *candidates = [NSMutableArray array];
+    for (NSString *key in @[@"last_message_at", @"last_activity_at", @"updated_at", @"created_at"]) {
+        id value = LumiValue(chat, key);
+        if (value) {
+            [candidates addObject:value];
+        }
+    }
+    id lastMessage = LumiValue(chat, @"last_message") ?: LumiValue(chat, @"lastMessage");
+    for (NSString *key in @[@"created_at", @"sent_at", @"updated_at"]) {
+        id value = LumiValue(lastMessage, key);
+        if (value) {
+            [candidates addObject:value];
+        }
+    }
+    for (id candidate in candidates) {
+        NSDate *date = LumiDateFromValue(candidate);
+        if (date) {
+            return date;
+        }
+    }
+    return nil;
 }
 
 - (void)viewDidLoad {
@@ -515,6 +524,7 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
         weakSelf.chatGroups = [weakSelf groupedChats:weakSelf.chats];
         weakSelf.stateLabel.text = weakSelf.chats.count ? nil : @"Чатов пока нет. Откройте каталог и начните общение.";
         [weakSelf.tableView reloadData];
+        [weakSelf resolveMissingNames];
     }];
 }
 
@@ -528,13 +538,18 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     return [valid sortedArrayUsingComparator:^NSComparisonResult(id leftObject, id rightObject) {
         NSDictionary *left = LumiAsDictionary(leftObject);
         NSDictionary *right = LumiAsDictionary(rightObject);
-        id leftDate = nil;
-        id rightDate = nil;
-        for (NSString *key in @[@"last_message_at", @"updated_at", @"created_at"]) {
-            leftDate = LumiValue(left, key) ?: leftDate;
-            rightDate = LumiValue(right, key) ?: rightDate;
+        NSDate *leftDate = [self lastActivityDateFromChat:left ?: @{}];
+        NSDate *rightDate = [self lastActivityDateFromChat:right ?: @{}];
+        if (!leftDate && !rightDate) {
+            return NSOrderedSame;
         }
-        return LumiCompareDates(rightDate, leftDate);
+        if (!leftDate) {
+            return NSOrderedDescending;
+        }
+        if (!rightDate) {
+            return NSOrderedAscending;
+        }
+        return [rightDate compare:leftDate];
     }];
 }
 
@@ -597,14 +612,9 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
         // Находим дату последней активности в группе
         NSDate *lastDate = nil;
         for (NSDictionary *chat in groupChats) {
-            for (NSString *key in @[@"last_message_at", @"updated_at", @"created_at"]) {
-                NSString *dateStr = LumiAsString(LumiValue(chat, key));
-                if (dateStr.length) {
-                    NSDate *date = [self parseDate:dateStr];
-                    if (date && (!lastDate || [date compare:lastDate] == NSOrderedDescending)) {
-                        lastDate = date;
-                    }
-                }
+            NSDate *date = [self lastActivityDateFromChat:chat];
+            if (date && (!lastDate || [date compare:lastDate] == NSOrderedDescending)) {
+                lastDate = date;
             }
         }
         
@@ -642,6 +652,75 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     }
     NSDictionary *character = [store characterWithID:targetID];
     return character ?: [store storyWithID:targetID];
+}
+
+- (BOOL)isPlaceholderChatName:(NSString *)name {
+    return !name.length || [name isEqualToString:@"Персонаж"] || [name isEqualToString:@"История"];
+}
+
+/// The catalog is ~2000 cards and may still be syncing when the chat list is
+/// shown, so a group can start with a generic title. Resolve such groups from
+/// the public card endpoint (works without a session) and refresh its header.
+- (void)resolveMissingNames {
+    __weak typeof(self) weakSelf = self;
+    [self.chatGroups enumerateObjectsUsingBlock:^(LumiChatGroup *group, NSUInteger index, BOOL *stop) {
+        if (![self isPlaceholderChatName:group.targetName]) {
+            return;
+        }
+        NSString *identifier = group.targetID;
+        if (!identifier.length) {
+            return;
+        }
+        NSString *kind = group.targetKind ?: @"";
+        BOOL isStory = [kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"];
+        LumiAPICompletion completion = ^(id result, NSError *error) {
+            NSDictionary *detail = LumiAsDictionary(result);
+            NSString *name = LumiAsString(detail[@"name"]) ?: LumiAsString(detail[@"title"]);
+            if (!name.length) {
+                return;
+            }
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LumiChatGroup *target = nil;
+                if (index < strongSelf.chatGroups.count) {
+                    LumiChatGroup *candidate = strongSelf.chatGroups[index];
+                    if ([candidate.targetID isEqualToString:group.targetID]) {
+                        target = candidate;
+                    }
+                }
+                if (!target) {
+                    for (LumiChatGroup *candidate in strongSelf.chatGroups) {
+                        if ([candidate.targetID isEqualToString:group.targetID] &&
+                            [candidate.targetKind isEqualToString:group.targetKind]) {
+                            target = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (!target) {
+                    return;
+                }
+                target.targetName = name;
+                NSString *avatar = LumiAsString(detail[@"avatar_url"]);
+                if (avatar.length) {
+                    target.avatarURL = avatar;
+                }
+                NSUInteger section = [strongSelf.chatGroups indexOfObjectIdenticalTo:target];
+                if (section != NSNotFound && section < (NSUInteger)[strongSelf numberOfSectionsInTableView:strongSelf.tableView]) {
+                    [strongSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:section]
+                                        withRowAnimation:UITableViewRowAnimationNone];
+                }
+            });
+        };
+        if (isStory) {
+            [[LumiAPI sharedClient] fetchStoryWithID:identifier completion:completion];
+        } else {
+            [[LumiAPI sharedClient] fetchCharacterWithID:identifier completion:completion];
+        }
+    }];
 }
 
 #pragma mark - Table
