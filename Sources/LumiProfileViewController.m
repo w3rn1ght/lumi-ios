@@ -4,6 +4,7 @@
 #import "LumiCatalogStore.h"
 #import "LumiImageLoader.h"
 #import "LumiLoginViewController.h"
+#import "LumiChatAppearanceViewController.h"
 #import "LumiSafe.h"
 #import "LumiTheme.h"
 
@@ -83,6 +84,10 @@
     [journalButton addTarget:self action:@selector(journalTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:journalButton];
 
+    UIButton *appearanceButton = [self buttonWithTitle:@"🎨  Цвета чата" filled:NO];
+    [appearanceButton addTarget:self action:@selector(appearanceTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:appearanceButton];
+
     UILabel *version = [[UILabel alloc] init];
     version.translatesAutoresizingMaskIntoConstraints = NO;
     NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
@@ -142,6 +147,11 @@
         [journalButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [journalButton.widthAnchor constraintEqualToConstant:240.0],
         [journalButton.heightAnchor constraintEqualToConstant:40.0],
+
+        [appearanceButton.topAnchor constraintEqualToAnchor:journalButton.bottomAnchor constant:8.0],
+        [appearanceButton.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [appearanceButton.widthAnchor constraintEqualToConstant:240.0],
+        [appearanceButton.heightAnchor constraintEqualToConstant:40.0],
 
         [version.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor constant:-16.0],
         [version.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:24.0],
@@ -270,6 +280,11 @@
         [store forceRefresh];
     }
     [self refreshCatalogLabel];
+}
+
+- (void)appearanceTapped {
+    LumiChatAppearanceViewController *controller = [[LumiChatAppearanceViewController alloc] init];
+    [self.navigationController pushViewController:controller animated:YES];
 }
 
 - (void)journalTapped {

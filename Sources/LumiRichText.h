@@ -20,6 +20,15 @@ NS_ASSUME_NONNULL_BEGIN
                                       baseFont:(UIFont *)baseFont
                              prefixCommandName:(nullable NSString *)prefixCommandName;
 
+/// Chat palette aware variant: bold text and a leading `**Character Name**`
+/// render in `boldColor`; `> quotes` use `quoteTextColor` on `quoteFillColor`.
++ (NSAttributedString *)attributedStringForText:(nullable NSString *)text
+                                     textColor:(UIColor *)textColor
+                                      baseFont:(UIFont *)baseFont
+                                     boldColor:(nullable UIColor *)boldColor
+                                 quoteTextColor:(nullable UIColor *)quoteTextColor
+                                 quoteFillColor:(nullable UIColor *)quoteFillColor;
+
 /// Image URLs referenced by `[photo](url)` markers.
 + (NSArray<NSString *> *)imageURLsInText:(nullable NSString *)text;
 

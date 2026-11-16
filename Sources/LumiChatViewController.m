@@ -2,7 +2,10 @@
 #import "LumiAPI.h"
 #import <math.h>
 #import "LumiCatalogStore.h"
+#import "LumiChatAppearance.h"
+#import "LumiChatInfoViewController.h"
 #import "LumiImageLoader.h"
+#import "LumiImageViewerViewController.h"
 #import "LumiRichText.h"
 #import "LumiSafe.h"
 #import "LumiDiagnostics.h"
@@ -46,6 +49,19 @@ static CGFloat LumiPhotoHeightForRatio(CGFloat ratio, CGFloat width) {
     }
     CGFloat height = width * ratio;
     return MIN(MAX(height, 96.0), 420.0);
+}
+
+/// `**Кума** улыбается` -> "Кума". Used to find the speaker's avatar in the
+/// catalog for story chats with several characters.
+static NSString *LumiLeadingBoldName(NSString *text) {
+    if (![text hasPrefix:@"**"] || text.length < 5) {
+        return nil;
+    }
+    NSRange close = [text rangeOfString:@"**" options:0 range:NSMakeRange(2, text.length - 2)];
+    if (close.location == NSNotFound || close.location == 2) {
+        return nil;
+    }
+    return [text substringWithRange:NSMakeRange(2, close.location - 2)];
 }
 
 @interface LumiPhotoView : UIImageView
@@ -103,6 +119,8 @@ static CGFloat LumiPhotoHeightForRatio(CGFloat ratio, CGFloat width) {
 @property (nonatomic, strong) NSArray<NSLayoutConstraint *> *photoHeightConstraints;
 @property (nonatomic, strong) NSLayoutConstraint *leadingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *trailingConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *bubbleAfterAvatarConstraint;
+@property (nonatomic, strong) UIButton *avatarButton;
 @property (nonatomic, strong) NSLayoutConstraint *photoStackHeightConstraint;
 @property (nonatomic, strong) UIStackView *variantBar;
 @property (nonatomic, strong) UIButton *variantPrevButton;
@@ -112,6 +130,7 @@ static CGFloat LumiPhotoHeightForRatio(CGFloat ratio, CGFloat width) {
 @property (nonatomic, strong) NSLayoutConstraint *variantBottomConstraint;
 @property (nonatomic, weak) UITableView *hostTableView;
 @property (nonatomic, copy, nullable) void (^longPressHandler)(void);
+@property (nonatomic, copy, nullable) void (^avatarTapHandler)(void);
 @property (nonatomic, copy, nullable) void (^variantStepHandler)(NSInteger delta);
 @end
 
@@ -131,6 +150,18 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         self.bubble.translatesAutoresizingMaskIntoConstraints = NO;
         self.bubble.layer.cornerRadius = 16.0;
         [self.contentView addSubview:self.bubble];
+
+        self.avatarButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        self.avatarButton.translatesAutoresizingMaskIntoConstraints = NO;
+        self.avatarButton.backgroundColor = LumiSurfaceColor();
+        self.avatarButton.layer.cornerRadius = 16.0;
+        self.avatarButton.clipsToBounds = YES;
+        self.avatarButton.hidden = YES;
+        self.avatarButton.imageView.contentMode = UIViewContentModeScaleAspectFill;
+        self.avatarButton.imageView.clipsToBounds = YES;
+        [self.avatarButton setImage:[UIImage imageNamed:@"AvatarPlaceholder"] forState:UIControlStateNormal];
+        [self.avatarButton addTarget:self action:@selector(avatarTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self.contentView addSubview:self.avatarButton];
 
         self.bubbleLabel = [[UILabel alloc] init];
         self.bubbleLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -197,6 +228,8 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
 
         self.leadingConstraint = [self.bubble.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14.0];
         self.trailingConstraint = [self.bubble.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14.0];
+        self.bubbleAfterAvatarConstraint = [self.bubble.leadingAnchor constraintEqualToAnchor:self.avatarButton.trailingAnchor constant:8.0];
+        self.bubbleAfterAvatarConstraint.active = NO;
         self.photoStackHeightConstraint = [self.photoStack.heightAnchor constraintEqualToConstant:0.0];
         self.bubbleBottomConstraint = [self.bubble.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4.0];
         self.variantBottomConstraint = [self.variantBar.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4.0];
@@ -205,6 +238,7 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         [NSLayoutConstraint activateConstraints:@[
             [self.bubble.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4.0],
             [self.bubble.widthAnchor constraintLessThanOrEqualToAnchor:self.contentView.widthAnchor multiplier:0.82],
+            [self.bubble.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-14.0],
             [self.bubbleLabel.topAnchor constraintEqualToAnchor:self.bubble.topAnchor constant:10.0],
             [self.bubbleLabel.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:13.0],
             [self.bubbleLabel.trailingAnchor constraintEqualToAnchor:self.bubble.trailingAnchor constant:-13.0],
@@ -218,6 +252,12 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
 
             [self.variantBar.topAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:2.0],
             [self.variantBar.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:2.0],
+
+            [self.avatarButton.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:12.0],
+            [self.avatarButton.topAnchor constraintEqualToAnchor:self.bubble.topAnchor constant:2.0],
+            [self.avatarButton.widthAnchor constraintEqualToConstant:32.0],
+            [self.avatarButton.heightAnchor constraintEqualToConstant:32.0],
+            [self.avatarButton.bottomAnchor constraintLessThanOrEqualToAnchor:self.contentView.bottomAnchor constant:-4.0],
         ]];
     }
     return self;
@@ -239,6 +279,12 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
     self.bubbleBottomConstraint.active = YES;
     self.variantBottomConstraint.active = NO;
     self.longPressHandler = nil;
+    self.avatarTapHandler = nil;
+    self.avatarButton.hidden = YES;
+    [self.avatarButton setImage:[UIImage imageNamed:@"AvatarPlaceholder"] forState:UIControlStateNormal];
+    self.leadingConstraint.active = NO;
+    self.trailingConstraint.active = NO;
+    self.bubbleAfterAvatarConstraint.active = NO;
     self.variantStepHandler = nil;
 }
 
@@ -266,19 +312,32 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
                   pending:(BOOL)pending
                 photoURLs:(NSArray<NSString *> *)photoURLs
             variantsCount:(NSInteger)variantsCount
-              activeIndex:(NSInteger)activeIndex {
-    UIColor *textColor = isUser ? [UIColor whiteColor] : LumiTextColor();
+              activeIndex:(NSInteger)activeIndex
+                avatarURL:(NSString *)avatarURL {
+    LumiChatAppearance *appearance = [LumiChatAppearance sharedAppearance];
+    UIColor *textColor = isUser ? appearance.userTextColor : appearance.characterTextColor;
     UIFont *baseFont = LumiFont(15.0, UIFontWeightRegular);
     NSString *displayText = text.length ? text : (pending ? @"…" : @"");
     NSString *visible = [LumiRichTextRenderer stringByStrippingImageMarkers:displayText] ?: @"";
     self.bubbleLabel.attributedText = [LumiRichTextRenderer attributedStringForText:visible
-                                                                         textColor:textColor
-                                                                          baseFont:baseFont
-                                                                 prefixCommandName:@"**"];
+                                                                          textColor:textColor
+                                                                           baseFont:baseFont
+                                                                          boldColor:appearance.boldColor
+                                                                      quoteTextColor:appearance.quoteTextColor
+                                                                      quoteFillColor:appearance.quoteFillColor];
     self.bubbleLabel.hidden = visible.length == 0 && photoURLs.count == 0;
 
-    self.bubble.backgroundColor = isUser ? LumiAccentColor() : LumiSurfaceColor();
-    self.leadingConstraint.active = !isUser;
+    self.bubble.backgroundColor = isUser ? appearance.userBubbleColor : appearance.characterBubbleColor;
+
+    BOOL showAvatar = !isUser && avatarURL.length > 0;
+    self.avatarButton.hidden = !showAvatar;
+    if (showAvatar) {
+        [[LumiImageLoader sharedLoader] loadURLString:avatarURL intoImageView:self.avatarButton.imageView];
+    } else {
+        [self.avatarButton setImage:[UIImage imageNamed:@"AvatarPlaceholder"] forState:UIControlStateNormal];
+    }
+    self.leadingConstraint.active = !isUser && !showAvatar;
+    self.bubbleAfterAvatarConstraint.active = !isUser && showAvatar;
     self.trailingConstraint.active = isUser;
 
     CGFloat contentWidth = CGRectGetWidth(self.contentView.bounds);
@@ -373,6 +432,12 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
     }
 }
 
+- (void)avatarTapped {
+    if (self.avatarTapHandler) {
+        self.avatarTapHandler();
+    }
+}
+
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan && self.longPressHandler) {
         self.longPressHandler();
@@ -430,6 +495,8 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
 @interface LumiChatViewController () <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) NSDictionary *chat;
+@property (nonatomic, strong) NSDictionary *chatItem;
+@property (nonatomic, assign) LumiDetailKind chatKind;
 @property (nonatomic, copy) NSString *chatID;
 @property (nonatomic, copy) NSString *chatTitle;
 @property (nonatomic, copy, nullable) NSString *avatarURL;
@@ -450,6 +517,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) UILabel *stateLabel;
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *messages;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *speakerIndex;
 @property (nonatomic, assign) BOOL sending;
 @property (nonatomic, assign) BOOL loading;
 @property (nonatomic, assign) BOOL hasMore;
@@ -465,6 +533,8 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     if (self) {
         _chat = [self normalizedChat:chat];
         _chatID = [self chatIdentifierFromChat:chat] ?: @"";
+        _chatItem = [item copy] ?: @{};
+        _chatKind = kind;
         _messages = [NSMutableArray array];
         NSDictionary *safeItem = LumiAsDictionary(item) ?: @{};
         if (kind == LumiDetailKindStory) {
@@ -483,6 +553,19 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     [super viewDidLoad];
     self.view.backgroundColor = LumiBackgroundColor();
     [self refreshNavigationTitle];
+
+    UIButton *infoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
+    [infoButton addTarget:self action:@selector(infoTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:infoButton];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applyChatAppearance)
+                                                 name:LumiChatAppearanceDidChangeNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(catalogUpdated)
+                                                 name:LumiCatalogDidUpdateNotification
+                                               object:nil];
 
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -613,6 +696,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
     [LumiDiagnostics log:@"чат %@: открыт (%@), сообщений в списке: %lu",
      self.chatID, self.chatTitle ?: @"без названия", (unsigned long)self.messages.count];
+    [self applyChatAppearance];
     [self loadMessages];
     [self refreshSparks];
 }
@@ -630,6 +714,63 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     } else {
         self.title = name;
     }
+}
+
+- (void)applyChatAppearance {
+    LumiChatAppearance *appearance = [LumiChatAppearance sharedAppearance];
+    self.view.backgroundColor = appearance.chatBackgroundColor;
+    self.tableView.backgroundColor = appearance.chatBackgroundColor;
+    self.inputBar.backgroundColor = appearance.inputBarColor;
+    self.inputField.tintColor = appearance.boldColor;
+    self.inputField.textColor = appearance.characterTextColor;
+    self.inputField.backgroundColor = appearance.characterBubbleColor;
+    self.sendButton.backgroundColor = appearance.boldColor;
+    self.spinner.color = appearance.boldColor;
+    self.navigationItem.rightBarButtonItem.tintColor = appearance.boldColor;
+    [self safeReloadTable];
+}
+
+- (void)infoTapped {
+    LumiChatInfoViewController *controller = [[LumiChatInfoViewController alloc] initWithChat:self.chat
+                                                                                        item:self.chatItem
+                                                                                        kind:self.chatKind];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
+- (void)presentImageURL:(NSString *)urlString title:(NSString *)title {
+    if (!urlString.length) {
+        return;
+    }
+    LumiImageViewerViewController *viewer = [[LumiImageViewerViewController alloc] initWithImageURL:urlString title:title];
+    [self presentViewController:viewer animated:YES completion:nil];
+}
+
+- (NSDictionary *)speakerNamed:(NSString *)name {
+    if (!name.length) {
+        return nil;
+    }
+    if (!self.speakerIndex) {
+        NSMutableDictionary *index = [NSMutableDictionary dictionary];
+        LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+        for (NSDictionary *item in store.characters) {
+            NSString *itemName = LumiAsString(item[@"name"]);
+            if (itemName.length && !index[itemName]) {
+                index[itemName] = item;
+            }
+        }
+        for (NSDictionary *item in store.stories) {
+            NSString *itemName = LumiAsString(item[@"title"]);
+            if (itemName.length && !index[itemName]) {
+                index[itemName] = item;
+            }
+        }
+        self.speakerIndex = index;
+    }
+    return self.speakerIndex[name];
+}
+
+- (void)catalogUpdated {
+    self.speakerIndex = nil;
 }
 
 #pragma mark - Chat parsing
@@ -789,9 +930,34 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     if (isUserFlag) {
         isUser = isUserFlag.boolValue;
     }
+
+    NSString *avatar = LumiAsString(LumiValue(message, @"avatar_url"))
+        ?: LumiAsString(LumiValue(message, @"character_avatar_url"))
+        ?: LumiAsString(LumiValue(message, @"speaker_avatar_url"));
+    NSString *speakerName = LumiAsString(LumiValue(message, @"character_name"))
+        ?: LumiAsString(LumiValue(message, @"speaker_name"));
+    for (NSString *key in @[@"character", @"speaker", @"persona", @"target"]) {
+        NSDictionary *nested = LumiAsDictionary(LumiValue(message, key));
+        if (!nested) {
+            continue;
+        }
+        if (!avatar.length) {
+            avatar = LumiAsString(LumiValue(nested, @"avatar_url"));
+        }
+        if (!speakerName.length) {
+            speakerName = LumiAsString(LumiValue(nested, @"name"));
+        }
+    }
+
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
     result[@"content"] = content;
     result[@"is_user"] = @(isUser);
+    if (avatar.length) {
+        result[@"avatar_url"] = avatar;
+    }
+    if (speakerName.length) {
+        result[@"speaker_name"] = speakerName;
+    }
     NSString *identifier = LumiStringValue(LumiValue(message, @"id"));
     if (identifier.length) {
         result[@"id"] = identifier;
@@ -1603,7 +1769,8 @@ static const NSInteger kLumiPhotoSparkCost = 10;
                         pending:NO
                       photoURLs:@[]
                   variantsCount:1
-                    activeIndex:0];
+                    activeIndex:0
+                      avatarURL:@""];
         return cell;
     }
     NSDictionary *message = self.messages[indexPath.row];
@@ -1615,17 +1782,46 @@ static const NSInteger kLumiPhotoSparkCost = 10;
         variantsCount = MAX(variantsCount, (NSInteger)variants.count);
     }
     NSInteger activeIndex = [LumiAsNumber(message[@"active_variant_index"]) integerValue];
+    NSString *avatarURL = nil;
+    NSString *speakerName = nil;
+    if (!isUser) {
+        avatarURL = LumiStringValue(message[@"avatar_url"]);
+        speakerName = LumiStringValue(message[@"speaker_name"]);
+        if (!avatarURL.length) {
+            NSString *leadingName = LumiLeadingBoldName(LumiStringValue(message[@"content"]));
+            NSDictionary *speaker = [self speakerNamed:leadingName];
+            if (speaker) {
+                avatarURL = LumiStringValue(speaker[@"avatar_url"]);
+                if (!speakerName.length) {
+                    speakerName = LumiAsString(speaker[@"name"]) ?: LumiAsString(speaker[@"title"]);
+                }
+            }
+        }
+        if (!avatarURL.length) {
+            avatarURL = self.avatarURL;
+            if (!speakerName.length) {
+                speakerName = self.chatTitle;
+            }
+        }
+    }
     [cell configureWithText:LumiStringValue(message[@"content"])
                      isUser:isUser
                     pending:pending
                   photoURLs:LumiAsArray(message[@"photo_urls"]) ?: @[]
               variantsCount:variantsCount
-                activeIndex:activeIndex];
+                activeIndex:activeIndex
+                  avatarURL:avatarURL ?: @""];
     __weak typeof(self) weakSelf = self;
     NSInteger row = indexPath.row;
     cell.longPressHandler = ^{
         [weakSelf presentMessageMenuForRow:row];
     };
+    if (avatarURL.length) {
+        NSString *speaker = speakerName ?: self.chatTitle;
+        cell.avatarTapHandler = ^{
+            [weakSelf presentImageURL:avatarURL title:speaker];
+        };
+    }
     cell.variantStepHandler = ^(NSInteger delta) {
         [weakSelf stepVariantForRow:row delta:delta];
     };
