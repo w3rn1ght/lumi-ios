@@ -245,6 +245,7 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, copy) NSArray<NSDictionary *> *chats; // плоский массив для совместимости
 @property (nonatomic, strong) NSArray<LumiChatGroup *> *chatGroups; // сгруппированные чаты
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *resolvedItems;
 @property (nonatomic, assign) BOOL loading;
 - (NSDate *)parseDate:(NSString *)string;
 - (NSDate *)lastActivityDateFromChat:(NSDictionary *)chat;
@@ -289,6 +290,7 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     self.view.backgroundColor = LumiBackgroundColor();
     self.title = @"Чаты";
     self.chats = @[];
+    self.resolvedItems = [NSMutableDictionary dictionary];
 
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleGrouped];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -560,8 +562,19 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     for (NSDictionary *chat in chats) {
         NSString *targetID = LumiChatTargetIdentifier(chat);
         NSString *kind = LumiChatKind(chat);
-        if (!targetID.length || !kind.length) {
+        if (!targetID.length) {
+            // Never hide a chat just because the server omitted the target:
+            // keep it as its own single-chat group.
+            targetID = LumiChatIdentifier(chat);
+            if (!kind.length) {
+                kind = @"chat";
+            }
+        }
+        if (!targetID.length) {
             continue;
+        }
+        if (!kind.length) {
+            kind = @"character";
         }
         NSString *groupKey = [NSString stringWithFormat:@"%@:%@", kind, targetID];
         NSMutableArray *groupChats = groupsDict[groupKey];
@@ -584,6 +597,15 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
         NSDictionary *firstChat = groupChats[0];
         NSString *targetID = LumiChatTargetIdentifier(firstChat);
         NSString *kind = LumiChatKind(firstChat);
+        if (!targetID.length) {
+            targetID = LumiChatIdentifier(firstChat);
+            if (!kind.length) {
+                kind = @"chat";
+            }
+        }
+        if (!kind.length) {
+            kind = @"character";
+        }
         
         // Находим имя и аватар из каталога
         NSString *targetName = nil;
@@ -644,6 +666,10 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     }
     NSString *kind = LumiChatKind(chat);
     LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    NSDictionary *resolved = self.resolvedItems[targetID];
+    if (resolved) {
+        return resolved;
+    }
     if ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"]) {
         return [store storyWithID:targetID];
     }
@@ -708,6 +734,7 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
                 if (avatar.length) {
                     target.avatarURL = avatar;
                 }
+                strongSelf.resolvedItems[target.targetID] = detail;
                 NSUInteger section = [strongSelf.chatGroups indexOfObjectIdenticalTo:target];
                 if (section != NSNotFound && section < (NSUInteger)[strongSelf numberOfSectionsInTableView:strongSelf.tableView]) {
                     [strongSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:section]
