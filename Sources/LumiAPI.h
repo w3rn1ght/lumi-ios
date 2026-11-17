@@ -85,6 +85,9 @@ extern NSString *const LumiAuthDidChangeNotification;
 
 - (void)fetchChatsWithCompletion:(LumiAPICompletion)completion;
 - (void)fetchChatWithID:(NSString *)chatID completion:(LumiAPICompletion)completion;
+/// Per-chat counters/state. Relationship and memory data live here on builds
+/// where `/chats/{id}` only returns ids.
+- (void)fetchChatStatsWithID:(NSString *)chatID completion:(LumiAPICompletion)completion;
 - (void)openChatWithCharacterID:(nullable NSString *)characterID
                         storyID:(nullable NSString *)storyID
                      completion:(LumiAPICompletion)completion;

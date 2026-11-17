@@ -418,7 +418,9 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
                 constraint.constant = newHeight;
                 [cell updatePhotoStackHeight];
                 UITableView *table = cell.hostTableView;
-                if (table.window) {
+                // Once per photo per message is enough; off-screen cells pick the
+                // new height up on their next layout pass.
+                if (table.window && [table indexPathForCell:cell]) {
                     [UIView performWithoutAnimation:^{
                         [table beginUpdates];
                         [table endUpdates];
@@ -548,6 +550,11 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 @property (nonatomic, assign) BOOL speakerIndexBuilt;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIImage *> *speakerImages;
 @property (nonatomic, assign) BOOL speakerReloadScheduled;
+@property (nonatomic, assign) BOOL streamFlushScheduled;
+@property (nonatomic, assign) NSUInteger streamFlushToken;
+@property (nonatomic, assign) BOOL streamDirty;
+@property (nonatomic, assign) BOOL uiActive;
+@property (nonatomic, assign) BOOL readMarked;
 @property (nonatomic, assign) BOOL sending;
 @property (nonatomic, assign) BOOL loading;
 @property (nonatomic, assign) BOOL hasMore;
@@ -731,6 +738,26 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     [self loadMessages];
     [self loadSpeakerDetails];
     [self refreshSparks];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.uiActive = YES;
+    if (self.streamDirty) {
+        self.streamDirty = NO;
+        NSInteger count = self.messages.count;
+        if (count > 0) {
+            [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:count - 1 inSection:0]]];
+        }
+    }
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    self.uiActive = NO;
+    // Do not leave a half-updated table behind when a modal/push cancels
+    // streaming-driven reloads; the next appearance catches up.
+    [self cancelScheduledStreamFlush];
 }
 
 - (void)dealloc {
@@ -1039,7 +1066,10 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
             return;
         }
         [weakSelf sortAndReload];
-        [[LumiAPI sharedClient] markChatRead:weakSelf.chatID];
+        if (!weakSelf.readMarked) {
+            weakSelf.readMarked = YES;
+            [[LumiAPI sharedClient] markChatRead:weakSelf.chatID];
+        }
     }];
 }
 
@@ -1208,7 +1238,8 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     [self safeReloadTable];
     self.stateLabel.text = self.messages.count ? nil : @"Напишите первое сообщение";
     [self scrollToBottomAnimated:NO];
-    if (self.messages.count) {
+    if (self.messages.count && !self.readMarked) {
+        self.readMarked = YES;
         [[LumiAPI sharedClient] markChatRead:self.chatID];
     }
 }
@@ -1270,6 +1301,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     }
     self.inputField.text = @"";
     self.sending = YES;
+    self.readMarked = NO;
     self.sendButton.enabled = NO;
     self.sendButton.alpha = 0.5;
 
@@ -1299,6 +1331,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
 - (void)handleStreamEvent:(NSString *)type payload:(NSDictionary *)payload {
     if ([type isEqualToString:@"user_message"] || [type isEqualToString:@"user_message_updated"]) {
+        [self cancelScheduledStreamFlush];
         NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (normalized) {
@@ -1322,14 +1355,24 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
                 NSString *existing = LumiAsString(assistant[@"content"]) ?: @"";
                 NSString *combined = [existing stringByAppendingString:content];
                 assistant[@"content"] = combined;
-                NSArray *photos = LumiPhotoURLsInMessage(@{}, combined);
-                assistant[@"photo_urls"] = photos.count ? photos : nil;
-                [self reloadLastRows];
+                // Rescanning megabytes of Markdown for image tags on every token
+                // was burning the main thread. Cheap pre-check first.
+                BOOL maybeHasPhoto = [combined rangeOfString:@"[photo]" options:NSCaseInsensitiveSearch].location != NSNotFound
+                    || [content rangeOfString:@"http" options:NSCaseInsensitiveSearch].location != NSNotFound
+                    || [content rangeOfString:@"]("].location != NSNotFound;
+                if (maybeHasPhoto) {
+                    NSArray *photos = LumiPhotoURLsInMessage(@{}, combined);
+                    if (photos.count) {
+                        assistant[@"photo_urls"] = photos;
+                    }
+                }
+                [self scheduleStreamFlush];
             }
         }
         return;
     }
     if ([type isEqualToString:@"intro_message"]) {
+        [self cancelScheduledStreamFlush];
         NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (normalized) {
@@ -1340,6 +1383,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         return;
     }
     if ([type isEqualToString:@"done"]) {
+        [self cancelScheduledStreamFlush];
         NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (!normalized) {
@@ -1349,6 +1393,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         normalized[@"active_variant_index"] = @0;
         normalized[@"variants_count"] = @1;
         NSMutableDictionary *assistant = [self pendingAssistantMessage];
+        NSInteger reloadRow = -1;
         if (assistant) {
             if (![LumiAsString(normalized[@"content"]) length] && [LumiAsString(assistant[@"content"]) length]) {
                 normalized[@"content"] = assistant[@"content"];
@@ -1359,13 +1404,20 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
             NSUInteger index = [self.messages indexOfObjectIdenticalTo:assistant];
             if (index != NSNotFound) {
                 [self.messages replaceObjectAtIndex:index withObject:normalized];
+                reloadRow = (NSInteger)index;
             } else {
                 [self.messages addObject:normalized];
             }
         } else {
             [self.messages addObject:normalized];
         }
-        [self reloadAllRows];
+        if (reloadRow == (NSInteger)self.messages.count - 1) {
+            // Streaming already painted this bubble; a full reload would make the
+            // whole list re-layout and jump.
+            [self reloadLastRows];
+        } else {
+            [self reloadAllRows];
+        }
         [self scrollToBottomAnimated:YES];
         return;
     }
@@ -1396,13 +1448,61 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     if (count <= 0) {
         return;
     }
-    NSMutableSet *paths = [NSMutableSet set];
-    [paths addObject:[NSIndexPath indexPathForRow:count - 1 inSection:0]];
-    if (count >= 2) {
-        [paths addObject:[NSIndexPath indexPathForRow:count - 2 inSection:0]];
+    // While the user reads history (or is on another screen), keep mutating the
+    // model but leave the table alone: re-laying out a growing bubble off-screen
+    // is pure waste.
+    if (!self.uiActive || ![self isNearBottom]) {
+        self.streamDirty = YES;
+        return;
     }
-    [self safeReloadRows:paths];
+    self.streamDirty = NO;
+    [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:count - 1 inSection:0]]];
     [self scrollToBottomAnimated:NO];
+}
+
+/// Coalesces per-token stream deltas into ~12 UI updates per second.
+- (void)scheduleStreamFlush {
+    if (self.streamFlushScheduled) {
+        return;
+    }
+    self.streamFlushScheduled = YES;
+    NSUInteger token = self.streamFlushToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        LumiChatViewController *strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        if (token != strongSelf.streamFlushToken) {
+            return;
+        }
+        strongSelf.streamFlushScheduled = NO;
+        [strongSelf reloadLastRows];
+    });
+}
+
+- (void)cancelScheduledStreamFlush {
+    self.streamFlushToken += 1;
+    self.streamFlushScheduled = NO;
+}
+
+- (BOOL)isNearBottom {
+    UIScrollView *scrollView = self.tableView;
+    if (scrollView.bounds.size.height <= 0.0) {
+        return YES;
+    }
+    CGFloat visibleBottom = scrollView.contentOffset.y + scrollView.bounds.size.height - scrollView.contentInset.bottom;
+    return visibleBottom >= scrollView.contentSize.height - 160.0;
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (self.streamDirty && scrollView == self.tableView && [self isNearBottom]) {
+        self.streamDirty = NO;
+        NSInteger count = self.messages.count;
+        if (count > 0) {
+            [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:count - 1 inSection:0]]];
+        }
+    }
 }
 
 /// Row-count-safe reload used while streaming: any mismatch is resolved by a
@@ -1456,6 +1556,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 }
 
 - (void)finishStreamingWithError:(NSError *)error {
+    [self cancelScheduledStreamFlush];
     self.sending = NO;
     self.sendButton.enabled = YES;
     self.sendButton.alpha = 1.0;

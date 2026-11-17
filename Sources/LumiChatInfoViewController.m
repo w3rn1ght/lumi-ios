@@ -178,6 +178,33 @@ static NSString *LumiCondensedText(NSString *text, NSString *name, NSUInteger li
     return [cut stringByAppendingString:@"…"];
 }
 
+/// Finds the block that describes `name` inside a story's `characters` text
+/// (blocks are separated by blank lines and start with the character name).
+static NSString *LumiRelationBlockForName(NSString *characters, NSString *name) {
+    if (!characters.length || !name.length) {
+        return nil;
+    }
+    NSCharacterSet *separators = [NSCharacterSet characterSetWithCharactersInString:@"—–-:,.; "];
+    for (NSString *block in [characters componentsSeparatedByString:@"\n\n"]) {
+        NSString *trimmed = [block stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!trimmed.length) {
+            continue;
+        }
+        NSRange range = [trimmed rangeOfString:name
+                                       options:NSCaseInsensitiveSearch | NSAnchoredSearch
+                                         range:NSMakeRange(0, trimmed.length)];
+        if (range.location != 0) {
+            continue;
+        }
+        NSUInteger after = NSMaxRange(range);
+        if (after < trimmed.length && ![separators characterIsMember:[trimmed characterAtIndex:after]]) {
+            continue; // "Нина" must not match "Нина-младшая" style prefixes
+        }
+        return trimmed;
+    }
+    return nil;
+}
+
 /// Walks the whole payload and collects scalar values found under keys that look
 /// like relationship or memory state. The API nests these differently between
 /// characters and stories, so key sniffing is more robust than a fixed path.
@@ -488,6 +515,7 @@ static void LumiCollectState(id value,
     [self render];
     [self loadDetail];
     [self loadChat];
+    [self loadStats];
 }
 
 - (void)dealloc {
@@ -633,6 +661,8 @@ static void LumiCollectState(id value,
         }
     }
 
+    NSString *charactersText = LumiAsString(self.resolved[@"characters"]);
+    BOOL hasRelationText = NO;
     for (NSDictionary *row in rows) {
         NSString *rowName = LumiAsString(row[@"name"]);
         NSMutableArray<NSString *> *parts = [NSMutableArray array];
@@ -662,6 +692,14 @@ static void LumiCollectState(id value,
         }
         NSString *text = [parts componentsJoinedByString:@"\n"];
         BOOL isBiography = NO;
+        if (!text.length && isStory) {
+            NSString *block = LumiRelationBlockForName(charactersText, rowName);
+            NSString *condensed = LumiCondensedText(block, rowName, 240);
+            if (condensed.length) {
+                text = condensed;
+                hasRelationText = YES;
+            }
+        }
         if (!text.length) {
             NSString *condensed = LumiCondensedText(LumiAsString(row[@"description"]), rowName, 170);
             if (condensed.length) {
@@ -683,7 +721,7 @@ static void LumiCollectState(id value,
         self.relationshipLabel.text = isStory
             ? @"Отношения в этой истории появятся после первого сообщения."
             : @"Здесь появятся отношения с персонажем, заметки и память о вашем общении.";
-    } else if (relationships.count == 0) {
+    } else if (relationships.count == 0 && !hasRelationText) {
         self.relationshipLabel.hidden = NO;
         self.relationshipLabel.textColor = LumiMutedColor();
         self.relationshipLabel.text = isStory
@@ -696,6 +734,12 @@ static void LumiCollectState(id value,
 
     NSMutableArray<NSString *> *memoryLines = [NSMutableArray array];
     NSMutableSet *seenMemory = [NSMutableSet set];
+    // `note` is the only memory-ish field the chat payload exposes on v1.5.7.
+    NSString *chatNote = LumiAsString(self.resolved[@"note"]);
+    if (chatNote.length) {
+        [seenMemory addObject:chatNote];
+        [memoryLines addObject:chatNote];
+    }
     for (NSDictionary *entry in self.memoryEntries) {
         NSString *text = LumiAsString(entry[@"text"]);
         if (!text.length || [seenMemory containsObject:text]) {
@@ -839,6 +883,31 @@ static void LumiCollectState(id value,
          strongSelf.chatID, [[chat allKeys] componentsJoinedByString:@","]];
         [strongSelf mergePayload:chat skippingIdentifier:YES];
         [strongSelf collectCastFrom:chat];
+        [strongSelf render];
+    }];
+}
+
+/// `/chats/{id}/stats` exists on the live API but is not documented; scan it
+/// for relationship/memory keys the same way as the rest of the payload.
+- (void)loadStats {
+    if (!self.chatID.length) {
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] fetchChatStatsWithID:self.chatID completion:^(id result, NSError *error) {
+        LumiChatInfoViewController *strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSDictionary *stats = LumiAsDictionary(result);
+        if (!stats) {
+            [LumiDiagnostics log:@"О чате %@: статистика недоступна — %@",
+             strongSelf.chatID, error.localizedDescription ?: @"нет данных"];
+            return;
+        }
+        [LumiDiagnostics log:@"О чате %@: поля статистики — %@",
+         strongSelf.chatID, [[stats allKeys] componentsJoinedByString:@","]];
+        [strongSelf mergePayload:stats skippingIdentifier:YES];
         [strongSelf render];
     }];
 }

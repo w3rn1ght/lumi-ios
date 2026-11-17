@@ -1,6 +1,8 @@
 #import "LumiRichText.h"
+#import <objc/runtime.h>
 
 static NSString *const kQuoteAttribute = @"LumiQuoteAttribute";
+static const void *kLumiCircleCacheKey = &kLumiCircleCacheKey;
 
 static UIColor *LumiRichDefaultBoldColor(void) {
     return [UIColor colorWithRed:0.290 green:0.871 blue:0.502 alpha:1.0];
@@ -54,6 +56,30 @@ static UIImage *LumiCircularImage(UIImage *image, CGFloat side) {
     return result;
 }
 
+/// Cropping portraits is done for every `**Name**` of every visible cell on
+/// each redraw. Cache the rounded result on the source image so streaming does
+/// not re-rasterise the same avatars dozens of times per second.
+static UIImage *LumiCircularImageCached(UIImage *image, CGFloat side) {
+    if (!image || side < 2.0) {
+        return nil;
+    }
+    NSString *key = [NSString stringWithFormat:@"lumi.circle.%.0f", side];
+    NSMutableDictionary *cache = objc_getAssociatedObject(image, kLumiCircleCacheKey);
+    if (!cache) {
+        cache = [NSMutableDictionary dictionary];
+        objc_setAssociatedObject(image, kLumiCircleCacheKey, cache, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    UIImage *cached = cache[key];
+    if (cached) {
+        return cached;
+    }
+    UIImage *circle = LumiCircularImage(image, side);
+    if (circle) {
+        cache[key] = circle;
+    }
+    return circle;
+}
+
 @interface LumiRichTextRenderer ()
 + (NSRange)leadingBoldNameRangeInString:(NSString *)string;
 + (UIFont *)displayFontForBaseFont:(UIFont *)baseFont;
@@ -70,7 +96,7 @@ static UIImage *LumiCircularImage(UIImage *image, CGFloat side) {
 @implementation LumiRichTextRenderer
 
 + (NSArray<NSString *> *)imageURLsInText:(NSString *)text {
-    if (!text.length) {
+    if (!text.length || [text rangeOfString:@"photo]" options:NSCaseInsensitiveSearch].location == NSNotFound) {
         return @[];
     }
     NSError *error = nil;
@@ -95,6 +121,9 @@ static UIImage *LumiCircularImage(UIImage *image, CGFloat side) {
     if (!text.length) {
         return text ?: @"";
     }
+    if ([text rangeOfString:@"photo]" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        return [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
     NSError *error = nil;
     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\[photo\\]\\((?:https?|blob):[^)\\s]+\\)"
                                                                            options:0
@@ -110,7 +139,9 @@ static UIImage *LumiCircularImage(UIImage *image, CGFloat side) {
 }
 
 + (NSArray<NSString *> *)boldNamesInText:(NSString *)text {
-    if (!text.length) {
+    if (!text.length
+        || ([text rangeOfString:@"**"].location == NSNotFound
+            && [text rangeOfString:@"__"].location == NSNotFound)) {
         return @[];
     }
     NSError *error = nil;
@@ -307,7 +338,7 @@ static UIImage *LumiCircularImage(UIImage *image, CGFloat side) {
 
 + (NSAttributedString *)avatarAttachmentForImage:(UIImage *)image font:(UIFont *)font {
     CGFloat side = round(MAX(16.0, font.pointSize * 1.25));
-    UIImage *circle = LumiCircularImage(image, side);
+    UIImage *circle = LumiCircularImageCached(image, side);
     if (!circle) {
         return nil;
     }

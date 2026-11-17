@@ -811,6 +811,15 @@ static const double kLumiLaneDeadline = 6.5;
     [self performRequest:request completion:completion];
 }
 
+- (void)fetchChatStatsWithID:(NSString *)chatID completion:(LumiAPICompletion)completion {
+    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
+                                                     path:[NSString stringWithFormat:@"/chats/%@/stats", chatID]
+                                                  baseURL:kAPIBaseURL
+                                                     body:nil
+                                                  timeout:25.0];
+    [self performRequest:request completion:completion];
+}
+
 - (void)openChatWithCharacterID:(NSString *)characterID
                         storyID:(NSString *)storyID
                      completion:(LumiAPICompletion)completion {
@@ -1064,6 +1073,7 @@ static const double kLumiLaneDeadline = 6.5;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong, nullable) NSURLSessionDataTask *task;
 @property (nonatomic, strong) NSMutableData *buffer;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingEvents;
 @property (nonatomic, assign) BOOL finished;
 @property (nonatomic, assign) NSInteger errorStatus;
 @end
@@ -1081,6 +1091,7 @@ static const double kLumiLaneDeadline = 6.5;
         _eventHandler = [eventHandler copy];
         _completion = [completion copy];
         _buffer = [NSMutableData data];
+        _pendingEvents = [NSMutableArray array];
     }
     return self;
 }
@@ -1132,15 +1143,21 @@ static const double kLumiLaneDeadline = 6.5;
 }
 
 - (void)finishWithError:(NSError *)error {
-    if (self.finished) {
-        return;
+    @synchronized (self) {
+        if (self.finished) {
+            return;
+        }
+        self.finished = YES;
     }
-    self.finished = YES;
     [self.task cancel];
     [self.session invalidateAndCancel];
-    void (^completion)(NSError *) = self.completion;
-    self.completion = nil;
-    self.eventHandler = nil;
+    [self flushPendingEvents];
+    void (^completion)(NSError *) = nil;
+    @synchronized (self) {
+        completion = self.completion;
+        self.completion = nil;
+        self.eventHandler = nil;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (completion) {
             completion(error);
@@ -1160,17 +1177,47 @@ didReceiveResponse:(NSURLResponse *)response
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+    if (self.finished) {
+        return;
+    }
     [self.buffer appendData:data];
     if (self.errorStatus == 0) {
         [self drainBuffer];
+        [self flushPendingEvents];
     }
+}
+
+static NSData *LumiSSESeparatorLF(void) {
+    static NSData *separator;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        separator = [@"\n\n" dataUsingEncoding:NSUTF8StringEncoding];
+    });
+    return separator;
+}
+
+static NSData *LumiSSESeparatorCRLF(void) {
+    static NSData *separator;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        separator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+    });
+    return separator;
 }
 
 - (void)drainBuffer {
     while (YES) {
-        NSRange separator = [self.buffer rangeOfData:[@"\n\n" dataUsingEncoding:NSUTF8StringEncoding]
-                                             options:0
-                                               range:NSMakeRange(0, self.buffer.length)];
+        // A server may use either LF or CRLF framing; pick whichever comes first.
+        NSRange full = NSMakeRange(0, self.buffer.length);
+        NSRange lf = [self.buffer rangeOfData:LumiSSESeparatorLF() options:0 range:full];
+        NSRange crlf = [self.buffer rangeOfData:LumiSSESeparatorCRLF() options:0 range:full];
+        NSRange separator = NSMakeRange(NSNotFound, 0);
+        if (lf.location != NSNotFound) {
+            separator = lf;
+        }
+        if (crlf.location != NSNotFound && (separator.location == NSNotFound || crlf.location < separator.location)) {
+            separator = crlf;
+        }
         if (separator.location == NSNotFound) {
             break;
         }
@@ -1181,16 +1228,25 @@ didReceiveResponse:(NSURLResponse *)response
             [self handleEventText:text];
         }
     }
+    // Never let a broken stream grow the buffer without bound.
+    if (self.buffer.length > 4 * 1024 * 1024) {
+        [self.buffer setLength:0];
+    }
 }
 
 - (void)handleEventText:(NSString *)text {
     NSString *event = @"message";
     NSMutableArray<NSString *> *dataLines = [NSMutableArray array];
     for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
-        if ([line hasPrefix:@"event:"]) {
-            event = [[line substringFromIndex:6] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        } else if ([line hasPrefix:@"data:"]) {
-            [dataLines addObject:[[line substringFromIndex:5] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]];
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\r"]];
+        if ([trimmed hasPrefix:@"event:"]) {
+            event = [[trimmed substringFromIndex:6] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        } else if ([trimmed hasPrefix:@"data:"]) {
+            NSString *value = [trimmed substringFromIndex:5];
+            if ([value hasPrefix:@" "]) {
+                value = [value substringFromIndex:1];
+            }
+            [dataLines addObject:value];
         }
     }
     if (!dataLines.count) {
@@ -1199,12 +1255,40 @@ didReceiveResponse:(NSURLResponse *)response
     NSData *jsonData = [[dataLines componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
     id payload = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:NULL];
     NSDictionary *dictionary = [payload isKindOfClass:[NSDictionary class]] ? payload : @{};
-    void (^handler)(NSString *, NSDictionary *) = self.eventHandler;
+    // Accumulate on the delegate queue and hand the whole batch to the main
+    // thread once per network chunk: per-token dispatch flooded the main queue
+    // and made long generations look like a freeze/crash.
+    // `cancel` can run on the main thread while the delegate queue is still
+    // delivering data, hence the lock.
+    @synchronized (self) {
+        [self.pendingEvents addObject:@{@"event": event ?: @"message", @"payload": dictionary}];
+    }
+}
+
+- (void)flushPendingEvents {
+    NSArray<NSDictionary *> *events = nil;
+    void (^handler)(NSString *, NSDictionary *) = nil;
+    @synchronized (self) {
+        if (!self.pendingEvents.count) {
+            return;
+        }
+        events = [self.pendingEvents copy];
+        [self.pendingEvents removeAllObjects];
+        handler = self.eventHandler;
+    }
     if (!handler) {
         return;
     }
     dispatch_async(dispatch_get_main_queue(), ^{
-        handler(event, dictionary);
+        @autoreleasepool {
+            for (NSDictionary *event in events) {
+                NSString *type = event[@"event"];
+                NSDictionary *payload = event[@"payload"];
+                if ([type isKindOfClass:[NSString class]] && [payload isKindOfClass:[NSDictionary class]]) {
+                    handler(type, payload);
+                }
+            }
+        }
     });
 }
 
@@ -1214,6 +1298,15 @@ didReceiveResponse:(NSURLResponse *)response
         NSString *message = LumiMessageFromPayload(payload, @"Не удалось отправить сообщение");
         [self finishWithError:LumiError(self.errorStatus, message)];
         return;
+    }
+    // Some servers close the stream without a trailing blank line; deliver the
+    // last event instead of silently losing the tail of the answer.
+    if (self.buffer.length) {
+        NSString *text = [[NSString alloc] initWithData:self.buffer encoding:NSUTF8StringEncoding];
+        [self.buffer setLength:0];
+        if (text.length) {
+            [self handleEventText:text];
+        }
     }
     [self finishWithError:error];
 }

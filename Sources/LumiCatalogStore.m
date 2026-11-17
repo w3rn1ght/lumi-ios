@@ -305,6 +305,12 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     @synchronized (self) {
         self.notifyScheduled = NO;
     }
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:LumiCatalogDidUpdateNotification object:self];
+        });
+        return;
+    }
     [[NSNotificationCenter defaultCenter] postNotificationName:LumiCatalogDidUpdateNotification object:self];
 }
 

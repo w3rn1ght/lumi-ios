@@ -64,6 +64,13 @@ static const NSUInteger kLumiAnimatedFrameLimit = 40;
 }
 
 - (void)loadURLString:(NSString *)urlString intoImageView:(UIImageView *)imageView {
+    urlString = LumiAsString(urlString);
+    NSString *currentURL = objc_getAssociatedObject(imageView, kLumiImageLoaderURLKey);
+    if (urlString.length && [currentURL isEqualToString:urlString]) {
+        // Cells are reconfigured on every stream flush; re-requesting the same
+        // avatar used to reset the image to the placeholder and flicker.
+        return;
+    }
     imageView.image = [UIImage imageNamed:@"AvatarPlaceholder"];
     [self loadURLString:urlString intoImageView:imageView placeholder:YES];
 }
@@ -153,7 +160,16 @@ static const NSUInteger kLumiAnimatedFrameLimit = 40;
 #pragma mark - Decoding
 
 - (void)decodeData:(NSData *)data urlString:(NSString *)urlString completion:(void (^)(UIImage *))completion {
+    // WebP frames are decoded at full resolution before downscaling, so a burst
+    // of portraits/photos could allocate hundreds of megabytes at once. Cap how
+    // many decodes run simultaneously.
+    static dispatch_semaphore_t decodeLimit;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        decodeLimit = dispatch_semaphore_create(2);
+    });
     dispatch_async(self.workQueue, ^{
+        dispatch_semaphore_wait(decodeLimit, DISPATCH_TIME_FOREVER);
         UIImage *image = nil;
         if (LumiDataIsWebP(data)) {
             image = LumiDecodeWebPData(data);
@@ -168,9 +184,14 @@ static const NSUInteger kLumiAnimatedFrameLimit = 40;
             image = [self downscaledImage:image maxDimension:kLumiImageMaxDimension];
         }
         if (image) {
-            NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * 4.0);
+            NSUInteger frames = MAX((NSUInteger)1, image.images.count);
+            // An animated image keeps every frame alive, so charge the cache for
+            // all of them; otherwise 40-frame stickers looked like 1 frame and
+            // the app got jetsam-killed during long chats.
+            NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * 4.0) * frames;
             [self.memoryCache setObject:image forKey:urlString cost:cost];
         }
+        dispatch_semaphore_signal(decodeLimit);
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(image);
         });
