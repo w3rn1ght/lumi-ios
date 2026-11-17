@@ -6,6 +6,10 @@ static UIColor *LumiRichDefaultBoldColor(void) {
     return [UIColor colorWithRed:0.290 green:0.871 blue:0.502 alpha:1.0];
 }
 
+static UIColor *LumiRichDefaultItalicColor(void) {
+    return [UIColor colorWithRed:0.525 green:0.937 blue:0.675 alpha:1.0];
+}
+
 static UIColor *LumiRichDefaultQuoteTextColor(void) {
     return [UIColor colorWithRed:0.184 green:0.620 blue:0.369 alpha:1.0];
 }
@@ -14,13 +18,52 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
     return [UIColor colorWithRed:0.086 green:0.196 blue:0.122 alpha:1.0];
 }
 
+/// `Эрис Грейрат:`, `Эрис Грейрат —` and `Эрис Грейрат` all resolve to the same
+/// portrait: strip punctuation that the model likes to append to names.
+static NSString *LumiSpeakerLookupKey(NSString *name) {
+    NSString *trimmed = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSCharacterSet *trailing = [NSCharacterSet characterSetWithCharactersInString:@":;,.!?—–-«»\"' \t"];
+    while (trimmed.length && [trailing characterIsMember:[trimmed characterAtIndex:trimmed.length - 1]]) {
+        trimmed = [trimmed substringToIndex:trimmed.length - 1];
+    }
+    return trimmed;
+}
+
+/// Cuts the image into a circle, aspect-filling it.
+static UIImage *LumiCircularImage(UIImage *image, CGFloat side) {
+    if (!image || side < 2.0) {
+        return nil;
+    }
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(side, side), NO, 0.0);
+    CGRect rect = CGRectMake(0.0, 0.0, side, side);
+    UIBezierPath *circle = [UIBezierPath bezierPathWithOvalInRect:rect];
+    [circle addClip];
+
+    CGSize imageSize = image.size;
+    if (imageSize.width > 0.0 && imageSize.height > 0.0) {
+        CGFloat ratio = MAX(CGRectGetWidth(rect) / imageSize.width, CGRectGetHeight(rect) / imageSize.height);
+        CGSize drawSize = CGSizeMake(imageSize.width * ratio, imageSize.height * ratio);
+        CGRect drawRect = CGRectMake((CGRectGetWidth(rect) - drawSize.width) / 2.0,
+                                     (CGRectGetHeight(rect) - drawSize.height) / 2.0,
+                                     drawSize.width,
+                                     drawSize.height);
+        [image drawInRect:drawRect];
+    }
+    UIImage *result = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return result;
+}
+
 @interface LumiRichTextRenderer ()
 + (NSRange)leadingBoldNameRangeInString:(NSString *)string;
 + (UIFont *)displayFontForBaseFont:(UIFont *)baseFont;
++ (NSAttributedString *)avatarAttachmentForImage:(UIImage *)image font:(UIFont *)font;
 + (NSAttributedString *)renderInlineText:(NSString *)text
                                textColor:(UIColor *)textColor
                                 baseFont:(UIFont *)baseFont
-                               boldColor:(UIColor *)boldColor;
+                               boldColor:(UIColor *)boldColor
+                             italicColor:(UIColor *)italicColor
+                            speakerImages:(NSDictionary<NSString *, UIImage *> *)speakerImages;
 + (NSAttributedString *)plainString:(NSString *)text font:(UIFont *)font color:(UIColor *)color;
 @end
 
@@ -60,10 +103,37 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
         return text;
     }
     NSString *stripped = [regex stringByReplacingMatchesInString:text
-                                                        options:0
-                                                          range:NSMakeRange(0, text.length)
-                                                   withTemplate:@""];
+                                                         options:0
+                                                           range:NSMakeRange(0, text.length)
+                                                    withTemplate:@""];
     return [stripped stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
++ (NSArray<NSString *> *)boldNamesInText:(NSString *)text {
+    if (!text.length) {
+        return @[];
+    }
+    NSError *error = nil;
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"(?:\\*\\*|__)([^\\*_\\n]{1,60}?)(?:\\*\\*|__)"
+                                                                           options:0
+                                                                             error:&error];
+    if (!regex) {
+        return @[];
+    }
+    NSMutableArray *names = [NSMutableArray array];
+    NSArray *matches = [regex matchesInString:text options:0 range:NSMakeRange(0, text.length)];
+    for (NSTextCheckingResult *match in matches) {
+        if (match.numberOfRanges < 2) {
+            continue;
+        }
+        NSString *name = [[text substringWithRange:[match rangeAtIndex:1]]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        name = LumiSpeakerLookupKey(name);
+        if (name.length) {
+            [names addObject:name];
+        }
+    }
+    return names;
 }
 
 #pragma mark - Public API
@@ -75,8 +145,10 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
                                textColor:textColor
                                 baseFont:baseFont
                                boldColor:LumiRichDefaultBoldColor()
+                             italicColor:LumiRichDefaultItalicColor()
                            quoteTextColor:LumiRichDefaultQuoteTextColor()
-                           quoteFillColor:LumiRichDefaultQuoteFillColor()];
+                           quoteFillColor:LumiRichDefaultQuoteFillColor()
+                            speakerImages:nil];
 }
 
 + (NSAttributedString *)attributedStringForText:(NSString *)text
@@ -90,8 +162,10 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
                                textColor:textColor
                                 baseFont:baseFont
                                boldColor:LumiRichDefaultBoldColor()
+                             italicColor:LumiRichDefaultItalicColor()
                            quoteTextColor:LumiRichDefaultQuoteTextColor()
-                           quoteFillColor:LumiRichDefaultQuoteFillColor()];
+                           quoteFillColor:LumiRichDefaultQuoteFillColor()
+                            speakerImages:nil];
 }
 
 + (NSAttributedString *)attributedStringForText:(NSString *)text
@@ -100,10 +174,29 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
                                      boldColor:(UIColor *)boldColor
                                  quoteTextColor:(UIColor *)quoteTextColor
                                  quoteFillColor:(UIColor *)quoteFillColor {
+    return [self attributedStringForText:text
+                               textColor:textColor
+                                baseFont:baseFont
+                               boldColor:boldColor
+                             italicColor:LumiRichDefaultItalicColor()
+                           quoteTextColor:quoteTextColor
+                           quoteFillColor:quoteFillColor
+                            speakerImages:nil];
+}
+
++ (NSAttributedString *)attributedStringForText:(NSString *)text
+                                     textColor:(UIColor *)textColor
+                                      baseFont:(UIFont *)baseFont
+                                     boldColor:(UIColor *)boldColor
+                                   italicColor:(UIColor *)italicColor
+                                 quoteTextColor:(UIColor *)quoteTextColor
+                                 quoteFillColor:(UIColor *)quoteFillColor
+                                  speakerImages:(NSDictionary<NSString *, UIImage *> *)speakerImages {
     if (!text.length) {
         return [[NSAttributedString alloc] initWithString:@""];
     }
     UIColor *accent = boldColor ?: LumiRichDefaultBoldColor();
+    UIColor *italic = italicColor ?: LumiRichDefaultItalicColor();
     UIColor *quoteText = quoteTextColor ?: LumiRichDefaultQuoteTextColor();
     UIColor *quoteFill = quoteFillColor ?: LumiRichDefaultQuoteFillColor();
     NSMutableAttributedString *result = [[NSMutableAttributedString alloc] init];
@@ -129,6 +222,13 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
         if (!isQuote && leadingName.location == 0) {
             NSString *name = [content substringWithRange:leadingName];
             UIFont *displayFont = [self displayFontForBaseFont:baseFont];
+            UIImage *image = speakerImages[LumiSpeakerLookupKey(name)];
+            if (image) {
+                NSAttributedString *attachment = [self avatarAttachmentForImage:image font:baseFont];
+                if (attachment) {
+                    [lineAttributed appendAttributedString:attachment];
+                }
+            }
             [lineAttributed appendAttributedString:[[NSAttributedString alloc] initWithString:name attributes:@{
                 NSFontAttributeName: displayFont,
                 NSForegroundColorAttributeName: accent,
@@ -146,17 +246,21 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
                         NSForegroundColorAttributeName: textColor,
                     }]];
                     [lineAttributed appendAttributedString:[self renderInlineText:rest
-                                                                      textColor:textColor
-                                                                       baseFont:baseFont
-                                                                      boldColor:accent]];
+                                                                       textColor:textColor
+                                                                        baseFont:baseFont
+                                                                       boldColor:accent
+                                                                     italicColor:italic
+                                                                    speakerImages:speakerImages]];
                 }
             }
         } else {
             UIColor *lineColor = isQuote ? quoteText : textColor;
             lineAttributed = [[self renderInlineText:content
-                                         textColor:lineColor
-                                          baseFont:baseFont
-                                         boldColor:(isQuote ? quoteText : accent)] mutableCopy];
+                                          textColor:lineColor
+                                           baseFont:baseFont
+                                          boldColor:(isQuote ? quoteText : accent)
+                                        italicColor:(isQuote ? nil : italic)
+                                       speakerImages:(isQuote ? nil : speakerImages)] mutableCopy];
         }
 
         if (isQuote) {
@@ -201,6 +305,23 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
     return [UIFont fontWithName:@"Georgia-Bold" size:baseFont.pointSize] ?: boldFont;
 }
 
++ (NSAttributedString *)avatarAttachmentForImage:(UIImage *)image font:(UIFont *)font {
+    CGFloat side = round(MAX(16.0, font.pointSize * 1.25));
+    UIImage *circle = LumiCircularImage(image, side);
+    if (!circle) {
+        return nil;
+    }
+    NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
+    attachment.image = circle;
+    attachment.bounds = CGRectMake(0.0, round((font.capHeight - side) / 2.0), side, side);
+    NSMutableAttributedString *result = [[NSMutableAttributedString alloc]
+        initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+    [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"\u00A0" attributes:@{
+        NSFontAttributeName: font,
+    }]];
+    return result;
+}
+
 /// Returns the range of a `**Name**` prefix (without the asterisks) when the
 /// string starts with one, otherwise a not-found range.
 + (NSRange)leadingBoldNameRangeInString:(NSString *)string {
@@ -217,7 +338,9 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
 + (NSAttributedString *)renderInlineText:(NSString *)text
                                textColor:(UIColor *)textColor
                                 baseFont:(UIFont *)baseFont
-                               boldColor:(UIColor *)boldColor {
+                               boldColor:(UIColor *)boldColor
+                             italicColor:(UIColor *)italicColor
+                            speakerImages:(NSDictionary<NSString *, UIImage *> *)speakerImages {
     NSMutableAttributedString *output = [[NSMutableAttributedString alloc] initWithString:@""
                                                                               attributes:@{
         NSFontAttributeName: baseFont,
@@ -248,6 +371,13 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
         }
         if (match.numberOfRanges > 2 && [match rangeAtIndex:2].location != NSNotFound) {
             NSString *bold = [text substringWithRange:[match rangeAtIndex:2]];
+            UIImage *image = speakerImages[LumiSpeakerLookupKey(bold)];
+            if (image) {
+                NSAttributedString *attachment = [self avatarAttachmentForImage:image font:baseFont];
+                if (attachment) {
+                    [output appendAttributedString:attachment];
+                }
+            }
             [output appendAttributedString:[[NSAttributedString alloc] initWithString:bold attributes:@{
                 NSFontAttributeName: [self displayFontForBaseFont:baseFont],
                 NSForegroundColorAttributeName: boldColor ?: textColor,
@@ -260,7 +390,7 @@ static UIColor *LumiRichDefaultQuoteFillColor(void) {
                                             : [UIFont italicSystemFontOfSize:baseFont.pointSize];
             [output appendAttributedString:[[NSAttributedString alloc] initWithString:italic attributes:@{
                 NSFontAttributeName: italicFont,
-                NSForegroundColorAttributeName: [textColor colorWithAlphaComponent:0.92],
+                NSForegroundColorAttributeName: italicColor ?: [textColor colorWithAlphaComponent:0.92],
             }]];
         } else {
             // Inline photo: keep it as a readable marker.

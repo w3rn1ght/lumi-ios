@@ -62,6 +62,7 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
         presets = @{
             @"Изумруд": @{
                 @"bold": @"#4ADE80",
+                @"italic": @"#86EFAC",
                 @"quoteText": @"#2F9E5E",
                 @"quoteFill": @"#16321F",
                 @"characterBubble": @"#151D18",
@@ -73,6 +74,7 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
             },
             @"Аметист": @{
                 @"bold": @"#A78BFA",
+                @"italic": @"#C4B5FD",
                 @"quoteText": @"#8B5CF6",
                 @"quoteFill": @"#241B3A",
                 @"characterBubble": @"#181821",
@@ -84,6 +86,7 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
             },
             @"Океан": @{
                 @"bold": @"#38BDF8",
+                @"italic": @"#7DD3FC",
                 @"quoteText": @"#0EA5E9",
                 @"quoteFill": @"#0F2A3B",
                 @"characterBubble": @"#10222E",
@@ -95,6 +98,7 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
             },
             @"Закат": @{
                 @"bold": @"#FDBA74",
+                @"italic": @"#FED7AA",
                 @"quoteText": @"#F97316",
                 @"quoteFill": @"#3A1E10",
                 @"characterBubble": @"#221512",
@@ -106,6 +110,7 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
             },
             @"Роза": @{
                 @"bold": @"#F9A8D4",
+                @"italic": @"#FBCFE8",
                 @"quoteText": @"#DB2777",
                 @"quoteFill": @"#3A1029",
                 @"characterBubble": @"#24131C",
@@ -117,6 +122,7 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
             },
             @"Графит": @{
                 @"bold": @"#E5E7EB",
+                @"italic": @"#CBD5E1",
                 @"quoteText": @"#9CA3AF",
                 @"quoteFill": @"#242427",
                 @"characterBubble": @"#1A1A1D",
@@ -164,13 +170,14 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
 #pragma mark - Keys
 
 + (NSArray<NSString *> *)allKeys {
-    return @[@"bold", @"quoteText", @"quoteFill", @"characterBubble", @"characterText",
+    return @[@"bold", @"italic", @"quoteText", @"quoteFill", @"characterBubble", @"characterText",
              @"userBubble", @"userText", @"background", @"inputBar"];
 }
 
 /// Human readable names used by the appearance screen.
 + (NSString *)localizedNameForKey:(NSString *)key {
     if ([key isEqualToString:@"bold"]) return @"Жирный текст / акцент";
+    if ([key isEqualToString:@"italic"]) return @"Текст курсивом";
     if ([key isEqualToString:@"quoteText"]) return @"Текст цитаты";
     if ([key isEqualToString:@"quoteFill"]) return @"Обводка цитаты";
     if ([key isEqualToString:@"characterBubble"]) return @"Пузырь персонажа";
@@ -205,6 +212,9 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
         if (color) {
             self.colors[key] = color;
         }
+    }
+    if (_isCustom) {
+        _presetName = @"Своя палитра";
     }
 }
 
@@ -254,6 +264,8 @@ static NSString *LumiStringValueInDictionary(NSDictionary *dictionary, NSString 
 
 - (UIColor *)boldColor { return self.colors[@"bold"]; }
 - (void)setBoldColor:(UIColor *)color { [self storeColor:color key:@"bold"]; }
+- (UIColor *)italicColor { return self.colors[@"italic"]; }
+- (void)setItalicColor:(UIColor *)color { [self storeColor:color key:@"italic"]; }
 - (UIColor *)quoteTextColor { return self.colors[@"quoteText"]; }
 - (void)setQuoteTextColor:(UIColor *)color { [self storeColor:color key:@"quoteText"]; }
 - (UIColor *)quoteFillColor { return self.colors[@"quoteFill"]; }

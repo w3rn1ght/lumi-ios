@@ -2,57 +2,69 @@
 #import "LumiAPI.h"
 #import "LumiChatAppearance.h"
 #import "LumiChatAppearanceViewController.h"
+#import "LumiDiagnostics.h"
 #import "LumiImageLoader.h"
 #import "LumiImageViewerViewController.h"
 #import "LumiSafe.h"
 #import "LumiTheme.h"
 
-static NSArray<NSString *> *LumiRelationshipKeys(void) {
-    return @[@"relationship", @"relationship_description", @"user_relationship",
-             @"relationship_state", @"relationship_status", @"relationship_level",
-             @"relationship_level_name", @"affection", @"affection_level", @"affinity",
-             @"trust", @"trust_level", @"user_notes", @"notes", @"memory", @"memories",
-             @"summary", @"user_summary", @"character_summary", @"chat_summary", @"status"];
-}
-
 static NSArray<NSString *> *LumiAboutKeys(void) {
     return @[@"description", @"backstory", @"personality", @"scenario", @"appearance", @"greeting"];
 }
 
+static NSArray<NSString *> *LumiRelationshipNeedles(void) {
+    return @[@"relationship", @"relation", @"affection", @"affinity", @"trust", @"bond",
+             @"attitude", @"feeling", @"romance", @"dating", @"standing", @"reputation"];
+}
+
+static NSArray<NSString *> *LumiMemoryNeedles(void) {
+    return @[@"memory", @"memories", @"user_notes", @"chat_summary", @"user_summary",
+             @"character_summary", @"notes", @"remember"];
+}
+
 static NSString *LumiHumanizedKey(NSString *key) {
-    NSDictionary *labels = @{
-        @"relationship": @"Отношения",
-        @"relationship_description": @"Отношения",
-        @"user_relationship": @"Ваши отношения",
-        @"relationship_state": @"Состояние отношений",
-        @"relationship_status": @"Статус отношений",
-        @"relationship_level": @"Уровень отношений",
-        @"relationship_level_name": @"Уровень отношений",
-        @"affection": @"Привязанность",
-        @"affection_level": @"Привязанность",
-        @"affinity": @"Симпатия",
-        @"trust": @"Доверие",
-        @"trust_level": @"Доверие",
-        @"user_notes": @"Заметки",
-        @"notes": @"Заметки",
-        @"memory": @"Память",
-        @"memories": @"Память",
-        @"summary": @"Кратко",
-        @"user_summary": @"О вас",
-        @"character_summary": @"О персонаже",
-        @"chat_summary": @"О переписке",
-        @"status": @"Статус",
-        @"description": @"Описание",
-        @"backstory": @"Предыстория",
-        @"personality": @"Характер",
-        @"scenario": @"Сценарий",
-        @"appearance": @"Внешность",
-        @"greeting": @"Приветствие",
-        @"level": @"Уровень",
-        @"value": @"Значение",
-        @"name": @"Название",
-        @"title": @"Заголовок",
-    };
+    static NSDictionary *labels;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        labels = @{
+            @"relationship": @"Отношения",
+            @"relationship_description": @"Отношения",
+            @"relationship_state": @"Состояние отношений",
+            @"relationship_status": @"Статус отношений",
+            @"relationship_level": @"Уровень отношений",
+            @"relationship_level_name": @"Уровень отношений",
+            @"user_relationship": @"Ваши отношения",
+            @"affection": @"Привязанность",
+            @"affection_level": @"Привязанность",
+            @"affinity": @"Симпатия",
+            @"trust": @"Доверие",
+            @"trust_level": @"Доверие",
+            @"bond": @"Связь",
+            @"attitude": @"Отношение",
+            @"feeling": @"Чувства",
+            @"romance": @"Романтика",
+            @"dating": @"Встречания",
+            @"standing": @"Репутация",
+            @"reputation": @"Репутация",
+            @"memory": @"Память",
+            @"memories": @"Память",
+            @"user_notes": @"Заметки",
+            @"notes": @"Заметки",
+            @"chat_summary": @"О переписке",
+            @"user_summary": @"О вас",
+            @"character_summary": @"О персонаже",
+            @"status": @"Статус",
+            @"level": @"Уровень",
+            @"value": @"Значение",
+            @"score": @"Значение",
+            @"name": @"Имя",
+            @"title": @"Заголовок",
+            @"description": @"Описание",
+            @"avatar_url": @"Аватар",
+            @"character_id": @"Персонаж",
+            @"character": @"Персонаж",
+        };
+    });
     NSString *label = labels[key];
     if (label.length) {
         return label;
@@ -96,18 +108,111 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
     return nil;
 }
 
+static BOOL LumiKeyMatchesAny(NSString *key, NSArray<NSString *> *needles) {
+    NSString *lowercase = key.lowercaseString;
+    for (NSString *needle in needles) {
+        if ([lowercase containsString:needle]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSString *LumiEntryNameFromDictionary(NSDictionary *dictionary, NSString *fallback) {
+    NSString *name = LumiAsString(LumiValue(dictionary, @"character_name"))
+        ?: LumiAsString(LumiValue(dictionary, @"name"))
+        ?: LumiAsString(LumiValue(dictionary, @"display_name"))
+        ?: LumiAsString(LumiValue(dictionary, @"title"));
+    if (name.length) {
+        return name;
+    }
+    id character = LumiValue(dictionary, @"character");
+    if ([character isKindOfClass:[NSDictionary class]]) {
+        name = LumiAsString(LumiValue(character, @"name"))
+            ?: LumiAsString(LumiValue(character, @"title"));
+    } else if ([character isKindOfClass:[NSString class]]) {
+        name = character;
+    }
+    return name.length ? name : fallback;
+}
+
+static NSString *LumiEntryAvatarFromDictionary(NSDictionary *dictionary, NSString *fallback) {
+    NSString *avatar = LumiAsString(LumiValue(dictionary, @"avatar_url"))
+        ?: LumiAsString(LumiValue(dictionary, @"character_avatar_url"));
+    if (avatar.length) {
+        return avatar;
+    }
+    NSDictionary *character = LumiAsDictionary(LumiValue(dictionary, @"character"));
+    avatar = LumiAsString(LumiValue(character, @"avatar_url"));
+    return avatar.length ? avatar : fallback;
+}
+
+/// Walks the whole payload and collects scalar values found under keys that look
+/// like relationship or memory state. The API nests these differently between
+/// characters and stories, so key sniffing is more robust than a fixed path.
+static void LumiCollectState(id value,
+                             NSString *contextName,
+                             NSString *contextAvatar,
+                             BOOL memoryMode,
+                             NSMutableArray<NSDictionary *> *output,
+                             NSUInteger depth) {
+    if (!value || value == [NSNull null] || depth > 5) {
+        return;
+    }
+    NSArray<NSString *> *needles = memoryMode ? LumiMemoryNeedles() : LumiRelationshipNeedles();
+    if ([value isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)value) {
+            LumiCollectState(item, contextName, contextAvatar, memoryMode, output, depth + 1);
+        }
+        return;
+    }
+    if (![value isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+    NSDictionary *dictionary = (NSDictionary *)value;
+    NSString *name = LumiEntryNameFromDictionary(dictionary, contextName);
+    NSString *avatar = LumiEntryAvatarFromDictionary(dictionary, contextAvatar);
+    for (NSString *key in dictionary) {
+        id child = dictionary[key];
+        BOOL isContainer = [child isKindOfClass:[NSDictionary class]] || [child isKindOfClass:[NSArray class]];
+        BOOL matches = LumiKeyMatchesAny(key, needles);
+        if (matches && !isContainer) {
+            NSString *text = LumiReadableValue(child, 0);
+            if (text.length) {
+                [output addObject:@{
+                    @"name": name ?: @"",
+                    @"avatar_url": avatar ?: @"",
+                    @"label": LumiHumanizedKey(key),
+                    @"text": text,
+                }];
+            }
+            continue;
+        }
+        if (isContainer) {
+            LumiCollectState(child, name, avatar, memoryMode, output, depth + 1);
+        }
+    }
+}
+
 @interface LumiChatInfoViewController ()
 @property (nonatomic, strong) NSMutableDictionary *resolved;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *castMembers;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *relationshipEntries;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *memoryEntries;
 @property (nonatomic, assign) LumiDetailKind kind;
 @property (nonatomic, copy, nullable) NSString *targetIdentifier;
 @property (nonatomic, copy, nullable) NSString *chatID;
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *stack;
 @property (nonatomic, strong) UIButton *avatarButton;
+@property (nonatomic, strong) UIImageView *avatarImageView;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UILabel *relationshipTitleLabel;
+@property (nonatomic, strong) UIStackView *relationshipStack;
 @property (nonatomic, strong) UILabel *relationshipLabel;
+@property (nonatomic, strong) UILabel *memoryTitleLabel;
+@property (nonatomic, strong) UILabel *memoryLabel;
 @property (nonatomic, strong) UILabel *aboutTitleLabel;
 @property (nonatomic, strong) UILabel *aboutLabel;
 @property (nonatomic, strong) UILabel *tagsLabel;
@@ -118,6 +223,7 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
 - (UILabel *)labelWithText:(NSString *)text color:(UIColor *)color font:(UIFont *)font;
 - (UILabel *)sectionTitleWithText:(NSString *)text;
 - (UILabel *)bodyLabel;
+- (void)rebuildRelationships;
 @end
 
 @implementation LumiChatInfoViewController
@@ -129,6 +235,9 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
     if (self) {
         _kind = kind;
         _resolved = [NSMutableDictionary dictionary];
+        _castMembers = [NSMutableArray array];
+        _relationshipEntries = [NSMutableArray array];
+        _memoryEntries = [NSMutableArray array];
         NSDictionary *chatDictionary = LumiAsDictionary(chat) ?: @{};
         NSDictionary *itemDictionary = LumiAsDictionary(item) ?: @{};
         NSDictionary *target = LumiAsDictionary(LumiValue(chatDictionary, @"target")) ?: @{};
@@ -161,8 +270,49 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
         if (targetAvatar.length && !LumiAsString(_resolved[@"avatar_url"]).length) {
             _resolved[@"avatar_url"] = targetAvatar;
         }
+        [self collectCastFrom:target];
+        [self collectCastFrom:chatDictionary];
+        [self collectCastFrom:itemDictionary];
     }
     return self;
+}
+
+- (void)collectCastFrom:(NSDictionary *)dictionary {
+    if (![dictionary isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+    NSArray *cast = LumiAsArray(dictionary[@"cast_members"]) ?: LumiAsArray(dictionary[@"cast"]);
+    for (id member in cast) {
+        NSDictionary *entry = LumiAsDictionary(member);
+        NSString *name = LumiAsString(LumiValue(entry, @"name"));
+        if (!name.length) {
+            continue;
+        }
+        NSMutableDictionary *record = [NSMutableDictionary dictionary];
+        record[@"name"] = name;
+        NSString *avatar = LumiAsString(LumiValue(entry, @"avatar_url"));
+        if (avatar.length) {
+            record[@"avatar_url"] = avatar;
+        }
+        NSString *descriptionText = LumiAsString(LumiValue(entry, @"description"));
+        if (descriptionText.length) {
+            record[@"description"] = descriptionText;
+        }
+        NSString *identifier = LumiAsString(LumiValue(entry, @"id"));
+        if (identifier.length) {
+            record[@"id"] = identifier;
+        }
+        BOOL exists = NO;
+        for (NSDictionary *existing in self.castMembers) {
+            if ([LumiAsString(existing[@"name"]) isEqualToString:name]) {
+                exists = YES;
+                break;
+            }
+        }
+        if (!exists) {
+            [self.castMembers addObject:record];
+        }
+    }
 }
 
 - (void)viewDidLoad {
@@ -183,15 +333,28 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
 
     self.avatarButton = [UIButton buttonWithType:UIButtonTypeCustom];
     self.avatarButton.translatesAutoresizingMaskIntoConstraints = NO;
-    self.avatarButton.imageView.contentMode = UIViewContentModeScaleAspectFill;
-    self.avatarButton.imageView.clipsToBounds = YES;
     self.avatarButton.layer.cornerRadius = 54.0;
     self.avatarButton.clipsToBounds = YES;
     self.avatarButton.backgroundColor = LumiSurfaceColor();
-    [self.avatarButton setImage:[UIImage imageNamed:@"AvatarPlaceholder"] forState:UIControlStateNormal];
     [self.avatarButton addTarget:self action:@selector(avatarTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.avatarButton.widthAnchor constraintEqualToConstant:108.0].active = YES;
     [self.avatarButton.heightAnchor constraintEqualToConstant:108.0].active = YES;
+
+    // Remote images must not be assigned to UIButton.imageView: UIKit resets it
+    // on layout, which is why the portrait stayed a placeholder before.
+    self.avatarImageView = [[UIImageView alloc] initWithFrame:CGRectZero];
+    self.avatarImageView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.avatarImageView.contentMode = UIViewContentModeScaleAspectFill;
+    self.avatarImageView.clipsToBounds = YES;
+    self.avatarImageView.userInteractionEnabled = NO;
+    self.avatarImageView.image = [UIImage imageNamed:@"AvatarPlaceholder"];
+    [self.avatarButton addSubview:self.avatarImageView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.avatarImageView.topAnchor constraintEqualToAnchor:self.avatarButton.topAnchor],
+        [self.avatarImageView.leadingAnchor constraintEqualToAnchor:self.avatarButton.leadingAnchor],
+        [self.avatarImageView.trailingAnchor constraintEqualToAnchor:self.avatarButton.trailingAnchor],
+        [self.avatarImageView.bottomAnchor constraintEqualToAnchor:self.avatarButton.bottomAnchor],
+    ]];
 
     UIView *avatarContainer = [[UIView alloc] init];
     [avatarContainer addSubview:self.avatarButton];
@@ -223,11 +386,21 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
     [self.stack addArrangedSubview:self.subtitleLabel];
     [self.stack setCustomSpacing:18.0 afterView:self.subtitleLabel];
 
-    self.relationshipTitleLabel = [self sectionTitleWithText:@"Отношения с персонажем"];
+    self.relationshipTitleLabel = [self sectionTitleWithText:@"Отношения с персонажами"];
     [self.stack addArrangedSubview:self.relationshipTitleLabel];
+    self.relationshipStack = [[UIStackView alloc] init];
+    self.relationshipStack.axis = UILayoutConstraintAxisVertical;
+    self.relationshipStack.spacing = 12.0;
+    [self.stack addArrangedSubview:self.relationshipStack];
     self.relationshipLabel = [self bodyLabel];
     [self.stack addArrangedSubview:self.relationshipLabel];
     [self.stack setCustomSpacing:18.0 afterView:self.relationshipLabel];
+
+    self.memoryTitleLabel = [self sectionTitleWithText:@"Память"];
+    [self.stack addArrangedSubview:self.memoryTitleLabel];
+    self.memoryLabel = [self bodyLabel];
+    [self.stack addArrangedSubview:self.memoryLabel];
+    [self.stack setCustomSpacing:18.0 afterView:self.memoryLabel];
 
     self.aboutTitleLabel = [self sectionTitleWithText:@"Описание"];
     [self.stack addArrangedSubview:self.aboutTitleLabel];
@@ -316,9 +489,11 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
 #pragma mark - Rendering
 
 - (void)appearanceChanged {
-    self.relationshipTitleLabel.textColor = [[LumiChatAppearance sharedAppearance] boldColor] ?: LumiAccentColor();
-    self.aboutTitleLabel.textColor = [[LumiChatAppearance sharedAppearance] boldColor] ?: LumiAccentColor();
-    self.spinner.color = [[LumiChatAppearance sharedAppearance] boldColor] ?: LumiAccentColor();
+    UIColor *accent = [[LumiChatAppearance sharedAppearance] boldColor] ?: LumiAccentColor();
+    self.relationshipTitleLabel.textColor = accent;
+    self.memoryTitleLabel.textColor = accent;
+    self.aboutTitleLabel.textColor = accent;
+    self.spinner.color = accent;
 }
 
 - (void)render {
@@ -343,7 +518,7 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
 
     NSString *avatar = LumiAsString(LumiValue(resolved, @"avatar_url"));
     if (avatar.length) {
-        [[LumiImageLoader sharedLoader] loadURLString:avatar intoImageView:self.avatarButton.imageView];
+        [[LumiImageLoader sharedLoader] loadURLString:avatar intoImageView:self.avatarImageView];
     }
 
     NSMutableArray *aboutParts = [NSMutableArray array];
@@ -360,36 +535,6 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
         : (isStory ? @"Описание истории пока недоступно." : @"Описание персонажа пока недоступно.");
     self.aboutLabel.hidden = NO;
 
-    NSMutableArray *relationshipParts = [NSMutableArray array];
-    NSMutableSet *seen = [NSMutableSet set];
-    for (NSString *key in LumiRelationshipKeys()) {
-        id value = resolved[key];
-        NSString *text = LumiReadableValue(value, 0);
-        if (!text.length || [usedAbout containsObject:text] || [seen containsObject:text]) {
-            continue;
-        }
-        [seen addObject:text];
-        NSString *label = LumiHumanizedKey(key);
-        BOOL keyIsLabel = [label isEqualToString:@"Отношения"] || [label isEqualToString:@"Заметки"] ||
-                          [label isEqualToString:@"Память"] || [label isEqualToString:@"Кратко"] ||
-                          [label isEqualToString:@"О вас"] || [label isEqualToString:@"О персонаже"] ||
-                          [label isEqualToString:@"О переписке"];
-        [relationshipParts addObject:keyIsLabel ? text : [NSString stringWithFormat:@"%@: %@", label, text]];
-    }
-    if (relationshipParts.count) {
-        self.relationshipTitleLabel.hidden = NO;
-        self.relationshipLabel.hidden = NO;
-        self.relationshipLabel.textColor = LumiTextColor();
-        self.relationshipLabel.text = [relationshipParts componentsJoinedByString:@"\n"];
-    } else {
-        self.relationshipTitleLabel.hidden = NO;
-        self.relationshipLabel.hidden = NO;
-        self.relationshipLabel.textColor = LumiMutedColor();
-        self.relationshipLabel.text = isStory
-            ? @"Отношения в истории формируются по мере прохождения."
-            : @"Здесь появятся отношения с персонажем, заметки и память о вашем общении.";
-    }
-
     NSArray *tags = LumiAsArray(resolved[@"tags"]);
     NSMutableArray *tagStrings = [NSMutableArray array];
     for (id tag in tags) {
@@ -398,21 +543,203 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
             [tagStrings addObject:[@"#" stringByAppendingString:text]];
         }
     }
-    NSArray *cast = LumiAsArray(resolved[@"cast_members"]) ?: LumiAsArray(resolved[@"cast"]);
-    if (cast.count) {
-        NSMutableArray *names = [NSMutableArray array];
-        for (id member in cast) {
-            NSString *memberName = LumiAsString(LumiValue(member, @"name"));
-            if (memberName.length) {
-                [names addObject:memberName];
-            }
-        }
-        if (names.count) {
-            [tagStrings addObject:[NSString stringWithFormat:@"В истории: %@", [names componentsJoinedByString:@", "]]];
-        }
-    }
     self.tagsLabel.text = [tagStrings componentsJoinedByString:@"  "];
     self.tagsLabel.hidden = tagStrings.count == 0;
+
+    [self rebuildRelationships];
+}
+
+- (void)rebuildRelationships {
+    [self.relationshipEntries removeAllObjects];
+    [self.memoryEntries removeAllObjects];
+    LumiCollectState(self.resolved, nil, nil, NO, self.relationshipEntries, 0);
+    LumiCollectState(self.resolved, nil, nil, YES, self.memoryEntries, 0);
+
+    // Deduplicate identical lines that the API repeats under several keys.
+    NSMutableArray *relationships = [NSMutableArray array];
+    NSMutableSet *seen = [NSMutableSet set];
+    for (NSDictionary *entry in self.relationshipEntries) {
+        NSString *text = LumiAsString(entry[@"text"]);
+        NSString *name = LumiAsString(entry[@"name"]);
+        NSString *key = [NSString stringWithFormat:@"%@|%@", name ?: @"", text ?: @""];
+        if (!text.length || [seen containsObject:key]) {
+            continue;
+        }
+        [seen addObject:key];
+        [relationships addObject:entry];
+    }
+
+    for (UIView *view in [self.relationshipStack.arrangedSubviews copy]) {
+        [self.relationshipStack removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+
+    // Merge the story cast with any characters mentioned in relationship data.
+    NSMutableArray<NSDictionary *> *rows = [self.castMembers mutableCopy] ?: [NSMutableArray array];
+    for (NSDictionary *entry in relationships) {
+        NSString *entryName = LumiAsString(entry[@"name"]);
+        if (!entryName.length) {
+            continue;
+        }
+        BOOL exists = NO;
+        for (NSDictionary *row in rows) {
+            if ([LumiAsString(row[@"name"]) isEqualToString:entryName]) {
+                exists = YES;
+                break;
+            }
+        }
+        if (!exists) {
+            [rows addObject:@{@"name": entryName, @"avatar_url": LumiAsString(entry[@"avatar_url"]) ?: @""}];
+        }
+    }
+
+    BOOL isStory = self.kind == LumiDetailKindStory;
+    if (rows.count == 0) {
+        NSString *fallbackName = LumiAsString(self.resolved[@"name"]) ?: LumiAsString(self.resolved[@"title"]);
+        if (fallbackName.length) {
+            [rows addObject:@{@"name": fallbackName,
+                              @"avatar_url": LumiAsString(self.resolved[@"avatar_url"]) ?: @""}];
+        }
+    }
+
+    for (NSDictionary *row in rows) {
+        NSString *rowName = LumiAsString(row[@"name"]);
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        NSMutableArray<NSDictionary *> *matched = [NSMutableArray array];
+        for (NSDictionary *entry in relationships) {
+            NSString *entryName = LumiAsString(entry[@"name"]);
+            if (entryName.length && rowName.length &&
+                [entryName caseInsensitiveCompare:rowName] != NSOrderedSame) {
+                continue;
+            }
+            [matched addObject:entry];
+        }
+        if (matched.count == 0 && relationships.count > 0 && rows.count == 1) {
+            matched = [relationships mutableCopy];
+        }
+        for (NSDictionary *entry in matched) {
+            NSString *text = LumiAsString(entry[@"text"]);
+            NSString *label = LumiAsString(entry[@"label"]);
+            if (!text.length) {
+                continue;
+            }
+            if (label.length && ![label isEqualToString:@"Отношения"]) {
+                [parts addObject:[NSString stringWithFormat:@"%@: %@", label, text]];
+            } else {
+                [parts addObject:text];
+            }
+        }
+        NSString *text = [parts componentsJoinedByString:@"\n"];
+        if (!text.length) {
+            NSString *castDescription = LumiAsString(row[@"description"]);
+            if (castDescription.length) {
+                text = castDescription;
+            }
+        }
+        UIView *rowView = [self relationshipRowWithName:rowName
+                                               avatarURL:LumiAsString(row[@"avatar_url"])
+                                                     text:text
+                                                    isStory:isStory];
+        [self.relationshipStack addArrangedSubview:rowView];
+    }
+
+    if (rows.count == 0) {
+        self.relationshipLabel.hidden = NO;
+        self.relationshipLabel.textColor = LumiMutedColor();
+        self.relationshipLabel.text = isStory
+            ? @"Отношения в этой истории появятся после первого сообщения."
+            : @"Здесь появятся отношения с персонажем, заметки и память о вашем общении.";
+    } else {
+        self.relationshipLabel.hidden = YES;
+        self.relationshipLabel.text = nil;
+    }
+
+    NSMutableArray<NSString *> *memoryLines = [NSMutableArray array];
+    NSMutableSet *seenMemory = [NSMutableSet set];
+    for (NSDictionary *entry in self.memoryEntries) {
+        NSString *text = LumiAsString(entry[@"text"]);
+        if (!text.length || [seenMemory containsObject:text]) {
+            continue;
+        }
+        [seenMemory addObject:text];
+        NSString *label = LumiAsString(entry[@"label"]);
+        NSString *name = LumiAsString(entry[@"name"]);
+        if (name.length && rows.count > 1) {
+            [memoryLines addObject:[NSString stringWithFormat:@"%@ — %@", name, text]];
+        } else if (label.length && ![label isEqualToString:@"Память"]) {
+            [memoryLines addObject:[NSString stringWithFormat:@"%@: %@", label, text]];
+        } else {
+            [memoryLines addObject:text];
+        }
+    }
+    if (memoryLines.count) {
+        self.memoryTitleLabel.hidden = NO;
+        self.memoryLabel.hidden = NO;
+        self.memoryLabel.text = [memoryLines componentsJoinedByString:@"\n\n"];
+    } else {
+        self.memoryTitleLabel.hidden = YES;
+        self.memoryLabel.hidden = YES;
+        self.memoryLabel.text = nil;
+    }
+
+    [LumiDiagnostics log:@"О чате %@: отношения %lu, память %lu, каст %lu",
+     self.targetIdentifier ?: @"?",
+     (unsigned long)relationships.count,
+     (unsigned long)memoryLines.count,
+     (unsigned long)rows.count];
+}
+
+/// A cast row: round portrait, character name and the relationship text.
+- (UIView *)relationshipRowWithName:(NSString *)name
+                          avatarURL:(NSString *)avatarURL
+                               text:(NSString *)text
+                            isStory:(BOOL)isStory {
+    UIView *container = [[UIView alloc] init];
+
+    UIImageView *avatarView = [[UIImageView alloc] initWithFrame:CGRectZero];
+    avatarView.translatesAutoresizingMaskIntoConstraints = NO;
+    avatarView.contentMode = UIViewContentModeScaleAspectFill;
+    avatarView.clipsToBounds = YES;
+    avatarView.layer.cornerRadius = 18.0;
+    avatarView.backgroundColor = LumiSurfaceColor();
+    avatarView.image = [UIImage imageNamed:@"AvatarPlaceholder"];
+    if (avatarURL.length) {
+        [[LumiImageLoader sharedLoader] loadURLString:avatarURL intoImageView:avatarView];
+    }
+    [container addSubview:avatarView];
+
+    UILabel *nameLabel = [self labelWithText:name.length ? name : @"Персонаж"
+                                       color:LumiTextColor()
+                                        font:LumiFont(14.0, UIFontWeightSemibold)];
+    nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:nameLabel];
+
+    NSString *body = text.length ? text : (isStory
+        ? @"Отношения формируются по мере прохождения истории."
+        : @"Отношения ещё не заданы.");
+    UILabel *bodyLabel = [self labelWithText:body
+                                       color:text.length ? LumiTextColor() : LumiMutedColor()
+                                        font:LumiFont(13.0, UIFontWeightRegular)];
+    bodyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:bodyLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [avatarView.topAnchor constraintEqualToAnchor:container.topAnchor],
+        [avatarView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [avatarView.widthAnchor constraintEqualToConstant:36.0],
+        [avatarView.heightAnchor constraintEqualToConstant:36.0],
+
+        [nameLabel.topAnchor constraintEqualToAnchor:container.topAnchor],
+        [nameLabel.leadingAnchor constraintEqualToAnchor:avatarView.trailingAnchor constant:10.0],
+        [nameLabel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+
+        [bodyLabel.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:2.0],
+        [bodyLabel.leadingAnchor constraintEqualToAnchor:nameLabel.leadingAnchor],
+        [bodyLabel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [bodyLabel.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
+        [bodyLabel.bottomAnchor constraintGreaterThanOrEqualToAnchor:avatarView.bottomAnchor],
+    ]];
+    return container;
 }
 
 #pragma mark - Loading
@@ -434,13 +761,10 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
         if (!detail) {
             return;
         }
-        for (NSString *key in detail) {
-            id value = detail[key];
-            if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]] ||
-                [value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
-                strongSelf.resolved[key] = value;
-            }
-        }
+        [LumiDiagnostics log:@"О чате %@: поля карточки — %@",
+         identifier, [[detail allKeys] componentsJoinedByString:@","]];
+        [strongSelf mergePayload:detail skippingIdentifier:NO];
+        [strongSelf collectCastFrom:detail];
         [strongSelf render];
     };
     if (self.kind == LumiDetailKindStory) {
@@ -469,21 +793,37 @@ static NSString *LumiReadableValue(id value, NSUInteger depth) {
         NSDictionary *chat = LumiAsDictionary(LumiValue(payload, @"chat"))
             ?: LumiAsDictionary(LumiValue(payload, @"session"))
             ?: payload;
-        NSDictionary *target = LumiAsDictionary(LumiValue(chat, @"target")) ?: @{};
-        for (NSDictionary *source in @[chat, target]) {
-            for (NSString *key in source) {
-                if ([key isEqualToString:@"id"]) {
-                    continue;
-                }
-                id value = source[key];
-                if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]] ||
-                    [value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
-                    strongSelf.resolved[key] = value;
+        [LumiDiagnostics log:@"О чате %@: поля чата — %@",
+         strongSelf.chatID, [[chat allKeys] componentsJoinedByString:@","]];
+        [strongSelf mergePayload:chat skippingIdentifier:YES];
+        [strongSelf collectCastFrom:chat];
+        [strongSelf render];
+    }];
+}
+
+- (void)mergePayload:(NSDictionary *)payload skippingIdentifier:(BOOL)skipIdentifier {
+    for (NSString *key in payload) {
+        if (skipIdentifier && [key isEqualToString:@"id"]) {
+            continue;
+        }
+        id value = payload[key];
+        if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]] ||
+            [value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
+            self.resolved[key] = value;
+        }
+    }
+    NSDictionary *target = LumiAsDictionary(LumiValue(payload, @"target"));
+    if (target) {
+        for (NSString *key in target) {
+            id value = target[key];
+            if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]] ||
+                [value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
+                if (!self.resolved[key]) {
+                    self.resolved[key] = value;
                 }
             }
         }
-        [strongSelf render];
-    }];
+    }
 }
 
 #pragma mark - Actions

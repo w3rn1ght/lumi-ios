@@ -29,10 +29,25 @@ NS_ASSUME_NONNULL_BEGIN
                                  quoteTextColor:(nullable UIColor *)quoteTextColor
                                  quoteFillColor:(nullable UIColor *)quoteFillColor;
 
+/// Full variant: additionally inserts a small circular avatar before every
+/// `**Character Name**` found in `speakerImages` (keyed by character name),
+/// and renders `*italics*` in `italicColor`.
++ (NSAttributedString *)attributedStringForText:(nullable NSString *)text
+                                     textColor:(UIColor *)textColor
+                                      baseFont:(UIFont *)baseFont
+                                     boldColor:(nullable UIColor *)boldColor
+                                   italicColor:(nullable UIColor *)italicColor
+                                 quoteTextColor:(nullable UIColor *)quoteTextColor
+                                 quoteFillColor:(nullable UIColor *)quoteFillColor
+                                  speakerImages:(nullable NSDictionary<NSString *, UIImage *> *)speakerImages;
+
+/// Every `**Name**` / `__Name__` occurrence in the text.
++ (NSArray<NSString *> *)boldNamesInText:(nullable NSString *)text;
+
 /// Image URLs referenced by `[photo](url)` markers.
 + (NSArray<NSString *> *)imageURLsInText:(nullable NSString *)text;
 
-/// Removes `[photo](url)` markers so only the picture is shown in a bubble.
+/// Removes `[photo](url)` markers from the text.
 + (NSString *)stringByStrippingImageMarkers:(nullable NSString *)text;
 
 @end

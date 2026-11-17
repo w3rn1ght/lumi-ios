@@ -59,8 +59,9 @@ static UIImage *LumiCircleImage(UIColor *color, CGFloat diameter, BOOL bordered)
     for (NSUInteger index = 0; index < palette.count; index += perRow) {
         UIStackView *row = [[UIStackView alloc] init];
         row.axis = UILayoutConstraintAxisHorizontal;
-        row.spacing = 12.0;
-        row.distribution = UIStackViewDistributionFillEqually;
+        row.spacing = 8.0;
+        row.distribution = UIStackViewDistributionEqualSpacing;
+        row.alignment = UIStackViewAlignmentCenter;
         NSUInteger end = MIN(index + perRow, palette.count);
         for (NSUInteger swatch = index; swatch < end; swatch++) {
             UIColor *color = palette[swatch];
@@ -70,6 +71,7 @@ static UIImage *LumiCircleImage(UIColor *color, CGFloat diameter, BOOL bordered)
             button.tag = (NSInteger)swatch;
             button.layer.borderWidth = 1.0;
             button.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
+            [button.widthAnchor constraintEqualToConstant:48.0].active = YES;
             [button.heightAnchor constraintEqualToConstant:48.0].active = YES;
             [button addTarget:self action:@selector(swatchTapped:) forControlEvents:UIControlEventTouchUpInside];
             [row addArrangedSubview:button];
@@ -115,7 +117,11 @@ static UIImage *LumiCircleImage(UIColor *color, CGFloat diameter, BOOL bordered)
     if (self.selectionHandler) {
         self.selectionHandler(palette[index]);
     }
-    [self.navigationController popViewControllerAnimated:YES];
+    if (self.navigationController) {
+        [self.navigationController popViewControllerAnimated:YES];
+    } else {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }
 }
 
 @end
@@ -200,13 +206,15 @@ static UIImage *LumiCircleImage(UIColor *color, CGFloat diameter, BOOL bordered)
     LumiChatAppearance *appearance = [LumiChatAppearance sharedAppearance];
     UIView *bubble = [self.previewHeader viewWithTag:101];
     bubble.backgroundColor = appearance.characterBubbleColor;
-    NSString *sample = @"**Кума** улыбается и поправляет волосы.\n> «Ты правда думаешь, что я не замечу?»";
+    NSString *sample = @"**Кума** улыбается и *поправляет волосы*.\n> «Ты правда думаешь, что я не замечу?»";
     self.previewLabel.attributedText = [LumiRichTextRenderer attributedStringForText:sample
                                                                           textColor:appearance.characterTextColor
                                                                            baseFont:LumiFont(14.0, UIFontWeightRegular)
                                                                           boldColor:appearance.boldColor
+                                                                        italicColor:appearance.italicColor
                                                                       quoteTextColor:appearance.quoteTextColor
-                                                                      quoteFillColor:appearance.quoteFillColor];
+                                                                      quoteFillColor:appearance.quoteFillColor
+                                                                       speakerImages:nil];
 }
 
 - (void)appearanceChanged {
@@ -295,12 +303,25 @@ static UIImage *LumiCircleImage(UIColor *color, CGFloat diameter, BOOL bordered)
     picker.selectionHandler = ^(UIColor *color) {
         [weakAppearance setHexString:[LumiChatAppearance hexStringFromColor:color] forKey:key];
     };
+    // Push instead of presenting modally: the picker is a normal navigation
+    // step, so the standard back button returns to the palette list. The old
+    // modal flow had no way to dismiss on iOS 12 and looked "broken".
+    if (self.navigationController) {
+        [self.navigationController pushViewController:picker animated:YES];
+        return;
+    }
     UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:picker];
     navigation.navigationBar.barStyle = UIBarStyleBlack;
     navigation.navigationBar.barTintColor = LumiBackgroundColor();
     navigation.navigationBar.tintColor = appearance.boldColor ?: LumiAccentColor();
     navigation.navigationBar.titleTextAttributes = @{NSForegroundColorAttributeName: LumiTextColor()};
     [self presentViewController:navigation animated:YES completion:nil];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self refreshPreview];
+    [self.tableView reloadData];
 }
 
 @end

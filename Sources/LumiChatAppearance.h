@@ -12,6 +12,8 @@ extern NSString *const LumiChatAppearanceDidChangeNotification;
 
 /// Bold `**text**`, the quote outline and other accent details.
 @property (nonatomic, strong) UIColor *boldColor;
+/// Text written in `*italics*` — its own colour, independent of the body text.
+@property (nonatomic, strong) UIColor *italicColor;
 /// Text inside a `> quote`.
 @property (nonatomic, strong) UIColor *quoteTextColor;
 /// Translucent fill behind a quote line.
@@ -39,7 +41,7 @@ extern NSString *const LumiChatAppearanceDidChangeNotification;
 /// Reverts every colour to the default green preset.
 - (void)resetToDefault;
 
-/// Keys: bold, quoteText, quoteFill, characterBubble, characterText,
+/// Keys: bold, italic, quoteText, quoteFill, characterBubble, characterText,
 /// userBubble, userText, background, inputBar.
 - (nullable UIColor *)colorForKey:(NSString *)key;
 - (NSString *)hexStringForKey:(NSString *)key;
