@@ -147,6 +147,37 @@ static NSString *LumiEntryAvatarFromDictionary(NSDictionary *dictionary, NSStrin
     return avatar.length ? avatar : fallback;
 }
 
+/// Condenses a cast biography into one readable line: drops a leading
+/// "Имя — " that duplicates the row title, collapses newlines and cuts at a
+/// word boundary.
+static NSString *LumiCondensedText(NSString *text, NSString *name, NSUInteger limit) {
+    if (!text.length) {
+        return nil;
+    }
+    NSString *result = text;
+    if (name.length) {
+        for (NSString *separator in @[@" — ", @" - ", @" – ", @": "]) {
+            NSString *prefix = [name stringByAppendingString:separator];
+            if ([result hasPrefix:prefix]) {
+                result = [result substringFromIndex:prefix.length];
+                break;
+            }
+        }
+    }
+    result = [result stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    result = [result stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (result.length <= limit) {
+        return result.length ? result : nil;
+    }
+    NSString *cut = [result substringToIndex:limit];
+    NSRange space = [cut rangeOfString:@" " options:NSBackwardsSearch];
+    if (space.location != NSNotFound && space.location > limit / 2) {
+        cut = [cut substringToIndex:space.location];
+    }
+    cut = [cut stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [cut stringByAppendingString:@"…"];
+}
+
 /// Walks the whole payload and collects scalar values found under keys that look
 /// like relationship or memory state. The API nests these differently between
 /// characters and stories, so key sniffing is more robust than a fixed path.
@@ -630,16 +661,19 @@ static void LumiCollectState(id value,
             }
         }
         NSString *text = [parts componentsJoinedByString:@"\n"];
+        BOOL isBiography = NO;
         if (!text.length) {
-            NSString *castDescription = LumiAsString(row[@"description"]);
-            if (castDescription.length) {
-                text = castDescription;
+            NSString *condensed = LumiCondensedText(LumiAsString(row[@"description"]), rowName, 170);
+            if (condensed.length) {
+                text = condensed;
+                isBiography = YES;
             }
         }
         UIView *rowView = [self relationshipRowWithName:rowName
                                                avatarURL:LumiAsString(row[@"avatar_url"])
                                                      text:text
-                                                    isStory:isStory];
+                                                  isStory:isStory
+                                                biography:isBiography];
         [self.relationshipStack addArrangedSubview:rowView];
     }
 
@@ -649,6 +683,12 @@ static void LumiCollectState(id value,
         self.relationshipLabel.text = isStory
             ? @"Отношения в этой истории появятся после первого сообщения."
             : @"Здесь появятся отношения с персонажем, заметки и память о вашем общении.";
+    } else if (relationships.count == 0) {
+        self.relationshipLabel.hidden = NO;
+        self.relationshipLabel.textColor = LumiMutedColor();
+        self.relationshipLabel.text = isStory
+            ? @"Отношения с персонажами появятся по мере общения в истории."
+            : @"Отношения появятся по мере общения.";
     } else {
         self.relationshipLabel.hidden = YES;
         self.relationshipLabel.text = nil;
@@ -693,7 +733,8 @@ static void LumiCollectState(id value,
 - (UIView *)relationshipRowWithName:(NSString *)name
                           avatarURL:(NSString *)avatarURL
                                text:(NSString *)text
-                            isStory:(BOOL)isStory {
+                            isStory:(BOOL)isStory
+                          biography:(BOOL)isBiography {
     UIView *container = [[UIView alloc] init];
 
     UIImageView *avatarView = [[UIImageView alloc] initWithFrame:CGRectZero];
@@ -717,8 +758,9 @@ static void LumiCollectState(id value,
     NSString *body = text.length ? text : (isStory
         ? @"Отношения формируются по мере прохождения истории."
         : @"Отношения ещё не заданы.");
+    UIColor *bodyColor = (text.length && !isBiography) ? LumiTextColor() : LumiMutedColor();
     UILabel *bodyLabel = [self labelWithText:body
-                                       color:text.length ? LumiTextColor() : LumiMutedColor()
+                                       color:bodyColor
                                         font:LumiFont(13.0, UIFontWeightRegular)];
     bodyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [container addSubview:bodyLabel];
