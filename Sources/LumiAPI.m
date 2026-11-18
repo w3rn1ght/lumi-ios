@@ -536,8 +536,22 @@ static NSString *LumiEncodePath(NSString *path) {
 - (void)fetchCharacterCardsWithCursor:(NSString *)cursor
                                 limit:(NSInteger)limit
                            completion:(LumiAPICompletion)completion {
-    NSString *path = [NSString stringWithFormat:@"/characters?scope=all&fields=card&limit=%ld&sort=popular%@",
+    [self fetchCharacterCardsWithCursor:cursor limit:limit sort:@"popular" completion:completion];
+}
+
+- (void)fetchStoryCardsWithCursor:(NSString *)cursor
+                            limit:(NSInteger)limit
+                       completion:(LumiAPICompletion)completion {
+    [self fetchStoryCardsWithCursor:cursor limit:limit sort:@"popular" completion:completion];
+}
+
+- (void)fetchCharacterCardsWithCursor:(NSString *)cursor
+                                limit:(NSInteger)limit
+                                 sort:(NSString *)sort
+                           completion:(LumiAPICompletion)completion {
+    NSString *path = [NSString stringWithFormat:@"/characters?scope=all&fields=card&limit=%ld&sort=%@%@",
                       (long)limit,
+                      LumiEncodeQueryValue(sort.length ? sort : @"popular"),
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                       path:path
@@ -549,9 +563,11 @@ static NSString *LumiEncodePath(NSString *path) {
 
 - (void)fetchStoryCardsWithCursor:(NSString *)cursor
                             limit:(NSInteger)limit
+                             sort:(NSString *)sort
                        completion:(LumiAPICompletion)completion {
-    NSString *path = [NSString stringWithFormat:@"/stories?scope=all&fields=card&limit=%ld&sort=popular%@",
+    NSString *path = [NSString stringWithFormat:@"/stories?scope=all&fields=card&limit=%ld&sort=%@%@",
                       (long)limit,
+                      LumiEncodeQueryValue(sort.length ? sort : @"popular"),
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
     NSMutableURLRequest *request = [self requestWithMethod:@"GET"
                                                       path:path

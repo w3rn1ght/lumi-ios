@@ -77,8 +77,20 @@ extern NSString *const LumiAuthDidChangeNotification;
 - (void)fetchCharacterCardsWithCursor:(nullable NSString *)cursor
                                 limit:(NSInteger)limit
                            completion:(LumiAPICompletion)completion;
+
 - (void)fetchStoryCardsWithCursor:(nullable NSString *)cursor
                             limit:(NSInteger)limit
+                       completion:(LumiAPICompletion)completion;
+
+/// Same as above with an explicit order (`popular` / `newest` / `oldest`).
+/// `newest` is used as a second sweep when the first one is incomplete.
+- (void)fetchCharacterCardsWithCursor:(nullable NSString *)cursor
+                                limit:(NSInteger)limit
+                                 sort:(nullable NSString *)sort
+                           completion:(LumiAPICompletion)completion;
+- (void)fetchStoryCardsWithCursor:(nullable NSString *)cursor
+                            limit:(NSInteger)limit
+                             sort:(nullable NSString *)sort
                        completion:(LumiAPICompletion)completion;
 
 #pragma mark - Chats

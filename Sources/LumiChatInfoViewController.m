@@ -205,9 +205,178 @@ static NSString *LumiRelationBlockForName(NSString *characters, NSString *name) 
     return nil;
 }
 
-/// Walks the whole payload and collects scalar values found under keys that look
-/// like relationship or memory state. The API nests these differently between
-/// characters and stories, so key sniffing is more robust than a fixed path.
+/// Upper-cases the first letter so «влюблённые» reads as its own line.
+static NSString *LumiUppercaseFirst(NSString *text);
+
+/// Human title for a relationship scale key (`affection` → «Привязанность»).
+static NSString *LumiRelationScaleTitle(NSString *key) {
+    static NSDictionary<NSString *, NSString *> *titles;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        titles = @{
+            @"affection": @"Привязанность",
+            @"trust": @"Доверие",
+            @"intimacy": @"Близость",
+            @"tension": @"Напряжение",
+            @"conflict": @"Конфликт",
+            @"attitude": @"Отношение",
+            @"affinity": @"Симпатия",
+            @"respect": @"Уважение",
+            @"fear": @"Страх",
+            @"love": @"Любовь",
+        };
+    });
+    NSString *title = titles[[key lowercaseString]];
+    return title ?: LumiHumanizedKey(key);
+}
+
+/// `@{affection:30, trust:35}` → «Привязанность: 30 · Доверие: 35».
+static NSString *LumiRelationScaleLine(NSDictionary *scales) {
+    NSDictionary *dictionary = LumiAsDictionary(scales);
+    if (!dictionary.count) {
+        return nil;
+    }
+    NSArray<NSString *> *order = @[@"affection", @"trust", @"intimacy", @"tension", @"conflict"];
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    NSMutableSet<NSString *> *used = [NSMutableSet set];
+    for (NSString *key in order) {
+        NSNumber *number = LumiAsNumber(dictionary[key]);
+        if (!number) {
+            continue;
+        }
+        [used addObject:key];
+        [parts addObject:[NSString stringWithFormat:@"%@: %ld",
+                          LumiRelationScaleTitle(key), (long)lround(number.doubleValue)]];
+    }
+    for (NSString *key in dictionary) {
+        if ([used containsObject:[key lowercaseString]]) {
+            continue;
+        }
+        NSNumber *number = LumiAsNumber(dictionary[key]);
+        if (!number) {
+            continue;
+        }
+        [parts addObject:[NSString stringWithFormat:@"%@: %ld",
+                          LumiRelationScaleTitle(key), (long)lround(number.doubleValue)]];
+    }
+    return parts.count ? [parts componentsJoinedByString:@" · "] : nil;
+}
+
+/// One `story_cast_state` entry: «ледяное презрение · Отношение: 15».
+static NSString *LumiCastStateLine(NSDictionary *state) {
+    NSDictionary *dictionary = LumiAsDictionary(state);
+    if (!dictionary.count) {
+        return nil;
+    }
+    NSString *label = LumiAsString(dictionary[@"label"]);
+    NSNumber *attitude = LumiAsNumber(dictionary[@"attitude"]);
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    if (label.length) {
+        [parts addObject:LumiUppercaseFirst(label)];
+    }
+    if (attitude) {
+        [parts addObject:[NSString stringWithFormat:@"Отношение: %ld", (long)lround(attitude.doubleValue)]];
+    }
+    return parts.count ? [parts componentsJoinedByString:@" · "] : nil;
+}
+
+/// Upper-cases the first letter so «влюблённые» reads as its own line.
+static NSString *LumiUppercaseFirst(NSString *text) {
+    if (!text.length) {
+        return text;
+    }
+    return [text stringByReplacingCharactersInRange:NSMakeRange(0, 1)
+                                         withString:[[text substringToIndex:1] uppercaseString]];
+}
+
+/// `affection`/`trust`/… are rendered from `relationship_state` with proper
+/// titles and a stable order, so the generic scanner must not repeat the raw
+/// numbers as separate rows.
+static BOOL LumiIsRelationScaleEntry(NSDictionary *entry) {
+    NSString *label = LumiAsString(entry[@"label"]);
+    if (!label.length) {
+        return NO;
+    }
+    static NSArray<NSString *> *keys;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        keys = @[@"affection", @"trust", @"intimacy", @"tension", @"conflict",
+                 @"attitude", @"affinity", @"respect", @"fear", @"love"];
+    });
+    for (NSString *key in keys) {
+        if ([LumiRelationScaleTitle(key) isEqualToString:label]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+/// `current_scene_state` → «Время: …\nМесто: …\nСитуация: …\nОдежда: …».
+static NSString *LumiSceneText(NSDictionary *scene) {
+    NSDictionary *dictionary = LumiAsDictionary(scene);
+    if (!dictionary.count) {
+        return nil;
+    }
+    NSArray<NSString *> *order = @[@"time", @"location", @"situation", @"outfit"];
+    NSDictionary<NSString *, NSString *> *titles = @{
+        @"time": @"Время",
+        @"location": @"Место",
+        @"situation": @"Ситуация",
+        @"outfit": @"Одежда",
+    };
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *key in order) {
+        NSString *text = LumiAsString(dictionary[key]);
+        if (!text.length) {
+            continue;
+        }
+        [lines addObject:[NSString stringWithFormat:@"%@: %@", titles[key], LumiUppercaseFirst(text)]];
+    }
+    return lines.count ? [lines componentsJoinedByString:@"\n"] : nil;
+}
+
+/// Message counters and the model's current intent, rendered under the title.
+static NSString *LumiChatStatsText(NSNumber *total,
+                                   NSNumber *userCount,
+                                   NSNumber *modelCount,
+                                   NSNumber *episodes,
+                                   NSString *intent) {
+    NSMutableArray<NSString *> *counters = [NSMutableArray array];
+    if (total) {
+        [counters addObject:[NSString stringWithFormat:@"сообщений %ld", (long)total.integerValue]];
+    }
+    if (userCount) {
+        [counters addObject:[NSString stringWithFormat:@"ваших %ld", (long)userCount.integerValue]];
+    }
+    if (modelCount) {
+        [counters addObject:[NSString stringWithFormat:@"ответов %ld", (long)modelCount.integerValue]];
+    }
+    if (episodes) {
+        [counters addObject:[NSString stringWithFormat:@"эпизодов %ld", (long)episodes.integerValue]];
+    }
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    if (counters.count) {
+        [lines addObject:LumiUppercaseFirst([counters componentsJoinedByString:@" · "])];
+    }
+    if (intent.length) {
+        [lines addObject:[NSString stringWithFormat:@"Намерение: %@", intent]];
+    }
+    return lines.count ? [lines componentsJoinedByString:@"\n"] : nil;
+}
+
+/// Joins non-empty lines, dropping duplicates (label + scales + attitude can
+/// describe the same thing twice).
+static NSString *LumiJoinRelationLines(NSArray<NSString *> *lines) {
+    NSMutableArray<NSString *> *clean = [NSMutableArray array];
+    for (NSString *line in lines) {
+        if (line.length && ![clean containsObject:line]) {
+            [clean addObject:line];
+        }
+    }
+    return clean.count ? [clean componentsJoinedByString:@"\n"] : nil;
+}
+
+
 static void LumiCollectState(id value,
                              NSString *contextName,
                              NSString *contextAvatar,
@@ -266,9 +435,12 @@ static void LumiCollectState(id value,
 @property (nonatomic, strong) UIImageView *avatarImageView;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UILabel *relationshipTitleLabel;
 @property (nonatomic, strong) UIStackView *relationshipStack;
 @property (nonatomic, strong) UILabel *relationshipLabel;
+@property (nonatomic, strong) UILabel *sceneTitleLabel;
+@property (nonatomic, strong) UILabel *sceneLabel;
 @property (nonatomic, strong) UILabel *memoryTitleLabel;
 @property (nonatomic, strong) UILabel *memoryLabel;
 @property (nonatomic, strong) UILabel *aboutTitleLabel;
@@ -442,7 +614,14 @@ static void LumiCollectState(id value,
                                         font:LumiFont(13.0, UIFontWeightRegular)];
     self.subtitleLabel.textAlignment = NSTextAlignmentCenter;
     [self.stack addArrangedSubview:self.subtitleLabel];
-    [self.stack setCustomSpacing:18.0 afterView:self.subtitleLabel];
+
+    self.statusLabel = [self labelWithText:@""
+                                     color:LumiMutedColor()
+                                      font:LumiFont(11.5, UIFontWeightRegular)];
+    self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.hidden = YES;
+    [self.stack addArrangedSubview:self.statusLabel];
+    [self.stack setCustomSpacing:18.0 afterView:self.statusLabel];
 
     self.relationshipTitleLabel = [self sectionTitleWithText:@"Отношения с персонажами"];
     [self.stack addArrangedSubview:self.relationshipTitleLabel];
@@ -453,6 +632,12 @@ static void LumiCollectState(id value,
     self.relationshipLabel = [self bodyLabel];
     [self.stack addArrangedSubview:self.relationshipLabel];
     [self.stack setCustomSpacing:18.0 afterView:self.relationshipLabel];
+
+    self.sceneTitleLabel = [self sectionTitleWithText:@"Сцена"];
+    [self.stack addArrangedSubview:self.sceneTitleLabel];
+    self.sceneLabel = [self bodyLabel];
+    [self.stack addArrangedSubview:self.sceneLabel];
+    [self.stack setCustomSpacing:18.0 afterView:self.sceneLabel];
 
     self.memoryTitleLabel = [self sectionTitleWithText:@"Память"];
     [self.stack addArrangedSubview:self.memoryTitleLabel];
@@ -550,6 +735,7 @@ static void LumiCollectState(id value,
 - (void)appearanceChanged {
     UIColor *accent = [[LumiChatAppearance sharedAppearance] boldColor] ?: LumiAccentColor();
     self.relationshipTitleLabel.textColor = accent;
+    self.sceneTitleLabel.textColor = accent;
     self.memoryTitleLabel.textColor = accent;
     self.aboutTitleLabel.textColor = accent;
     self.spinner.color = accent;
@@ -614,14 +800,33 @@ static void LumiCollectState(id value,
     LumiCollectState(self.resolved, nil, nil, NO, self.relationshipEntries, 0);
     LumiCollectState(self.resolved, nil, nil, YES, self.memoryEntries, 0);
 
+    // The live API describes per-chat progress explicitly, which is far more
+    // useful than anything the key scanner can guess:
+    //   character chats → relationship_state {label, scales{…}}
+    //   story chats     → story_cast_state {uuid: {label, attitude}}
+    //   both            → current_scene_state {time, location, situation, outfit}
+    NSDictionary *relationshipState = LumiAsDictionary(self.resolved[@"relationship_state"]);
+    NSDictionary *castState = LumiAsDictionary(self.resolved[@"story_cast_state"]);
+    NSDictionary *sceneState = LumiAsDictionary(self.resolved[@"current_scene_state"]);
+    NSString *stateLabel = LumiAsString(relationshipState[@"label"]);
+    NSString *scaleLine = LumiRelationScaleLine(LumiAsDictionary(relationshipState[@"scales"]));
+    NSString *intent = LumiAsString(self.resolved[@"character_intent"]);
+    BOOL hasStructuredState = stateLabel.length || scaleLine.length || castState.count > 0;
+
     // Deduplicate identical lines that the API repeats under several keys.
     NSMutableArray *relationships = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     for (NSDictionary *entry in self.relationshipEntries) {
         NSString *text = LumiAsString(entry[@"text"]);
         NSString *name = LumiAsString(entry[@"name"]);
-        NSString *key = [NSString stringWithFormat:@"%@|%@", name ?: @"", text ?: @""];
-        if (!text.length || [seen containsObject:key]) {
+        if (!text.length) {
+            continue;
+        }
+        if (hasStructuredState && LumiIsRelationScaleEntry(entry)) {
+            continue; // rendered with titles from `relationship_state`
+        }
+        NSString *key = [NSString stringWithFormat:@"%@|%@", name ?: @"", text];
+        if ([seen containsObject:key]) {
             continue;
         }
         [seen addObject:key];
@@ -648,7 +853,13 @@ static void LumiCollectState(id value,
             }
         }
         if (!exists) {
-            [rows addObject:@{@"name": entryName, @"avatar_url": LumiAsString(entry[@"avatar_url"]) ?: @""}];
+            NSMutableDictionary *record = [NSMutableDictionary dictionary];
+            record[@"name"] = entryName;
+            NSString *avatar = LumiAsString(entry[@"avatar_url"]);
+            if (avatar.length) {
+                record[@"avatar_url"] = avatar;
+            }
+            [rows addObject:record];
         }
     }
 
@@ -656,16 +867,50 @@ static void LumiCollectState(id value,
     if (rows.count == 0) {
         NSString *fallbackName = LumiAsString(self.resolved[@"name"]) ?: LumiAsString(self.resolved[@"title"]);
         if (fallbackName.length) {
-            [rows addObject:@{@"name": fallbackName,
-                              @"avatar_url": LumiAsString(self.resolved[@"avatar_url"]) ?: @""}];
+            NSMutableDictionary *record = [NSMutableDictionary dictionary];
+            record[@"name"] = fallbackName;
+            NSString *avatar = LumiAsString(self.resolved[@"avatar_url"]);
+            if (avatar.length) {
+                record[@"avatar_url"] = avatar;
+            }
+            NSString *identifier = LumiAsString(self.resolved[@"id"]);
+            if (identifier.length) {
+                record[@"id"] = identifier;
+            }
+            [rows addObject:record];
         }
     }
 
+    // A single-entry cast state has no id to match against when the story
+    // payload was not resolved yet, but it is still unambiguous.
+    NSDictionary *soleCastState = nil;
+    if (castState.count == 1) {
+        soleCastState = LumiAsDictionary([castState allValues].firstObject);
+    }
+
     NSString *charactersText = LumiAsString(self.resolved[@"characters"]);
-    BOOL hasRelationText = NO;
+    BOOL hasRelationshipText = NO;
     for (NSDictionary *row in rows) {
         NSString *rowName = LumiAsString(row[@"name"]);
+        NSString *rowID = LumiAsString(row[@"id"]);
         NSMutableArray<NSString *> *parts = [NSMutableArray array];
+
+        NSDictionary *castEntry = rowID.length ? LumiAsDictionary(castState[rowID]) : nil;
+        if (!castEntry.count && soleCastState && (rows.count == 1 || !rowID.length)) {
+            castEntry = soleCastState;
+        }
+        NSString *castLine = LumiCastStateLine(castEntry);
+        if (castLine.length) {
+            [parts addObject:castLine];
+        } else if (rows.count == 1 && hasStructuredState) {
+            if (stateLabel.length) {
+                [parts addObject:LumiUppercaseFirst(stateLabel)];
+            }
+            if (scaleLine.length) {
+                [parts addObject:scaleLine];
+            }
+        }
+
         NSMutableArray<NSDictionary *> *matched = [NSMutableArray array];
         for (NSDictionary *entry in relationships) {
             NSString *entryName = LumiAsString(entry[@"name"]);
@@ -690,14 +935,14 @@ static void LumiCollectState(id value,
                 [parts addObject:text];
             }
         }
-        NSString *text = [parts componentsJoinedByString:@"\n"];
+
+        NSString *text = LumiJoinRelationLines(parts);
         BOOL isBiography = NO;
         if (!text.length && isStory) {
             NSString *block = LumiRelationBlockForName(charactersText, rowName);
             NSString *condensed = LumiCondensedText(block, rowName, 240);
             if (condensed.length) {
                 text = condensed;
-                hasRelationText = YES;
             }
         }
         if (!text.length) {
@@ -706,6 +951,9 @@ static void LumiCollectState(id value,
                 text = condensed;
                 isBiography = YES;
             }
+        }
+        if (text.length) {
+            hasRelationshipText = YES;
         }
         UIView *rowView = [self relationshipRowWithName:rowName
                                                avatarURL:LumiAsString(row[@"avatar_url"])
@@ -721,7 +969,7 @@ static void LumiCollectState(id value,
         self.relationshipLabel.text = isStory
             ? @"Отношения в этой истории появятся после первого сообщения."
             : @"Здесь появятся отношения с персонажем, заметки и память о вашем общении.";
-    } else if (relationships.count == 0 && !hasRelationText) {
+    } else if (!hasRelationshipText) {
         self.relationshipLabel.hidden = NO;
         self.relationshipLabel.textColor = LumiMutedColor();
         self.relationshipLabel.text = isStory
@@ -731,6 +979,19 @@ static void LumiCollectState(id value,
         self.relationshipLabel.hidden = YES;
         self.relationshipLabel.text = nil;
     }
+
+    NSString *sceneText = LumiSceneText(sceneState);
+    self.sceneTitleLabel.hidden = sceneText.length == 0;
+    self.sceneLabel.hidden = sceneText.length == 0;
+    self.sceneLabel.text = sceneText;
+
+    NSString *statsText = LumiChatStatsText(LumiAsNumber(self.resolved[@"messages_total"]),
+                                           LumiAsNumber(self.resolved[@"messages_user"]),
+                                           LumiAsNumber(self.resolved[@"messages_model"]),
+                                           LumiAsNumber(self.resolved[@"episodes_count"]),
+                                           intent);
+    self.statusLabel.hidden = statsText.length == 0;
+    self.statusLabel.text = statsText;
 
     NSMutableArray<NSString *> *memoryLines = [NSMutableArray array];
     NSMutableSet *seenMemory = [NSMutableSet set];
@@ -766,11 +1027,14 @@ static void LumiCollectState(id value,
         self.memoryLabel.text = nil;
     }
 
-    [LumiDiagnostics log:@"О чате %@: отношения %lu, память %lu, каст %lu",
+    [LumiDiagnostics log:@"О чате %@: отношения %lu, память %lu, каст %lu, состояние %@, каст-статусы %lu, сцена %@",
      self.targetIdentifier ?: @"?",
      (unsigned long)relationships.count,
      (unsigned long)memoryLines.count,
-     (unsigned long)rows.count];
+     (unsigned long)rows.count,
+     hasStructuredState ? (stateLabel ?: @"—") : @"нет",
+     (unsigned long)castState.count,
+     sceneText.length ? @"есть" : @"нет"];
 }
 
 /// A cast row: round portrait, character name and the relationship text.
