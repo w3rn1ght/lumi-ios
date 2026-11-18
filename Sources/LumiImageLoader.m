@@ -72,7 +72,11 @@ static const NSUInteger kLumiAnimatedFrameLimit = 40;
         NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
         configuration.timeoutIntervalForRequest = 30.0;
         configuration.HTTPMaximumConnectionsPerHost = 6;
-        configuration.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
+        // The loader keeps its own validated disk cache (and deletes entries it
+        // cannot decode). Letting NSURLCache answer as well meant a single bad
+        // cached body could be served forever, so every request goes to network
+        // when our own cache misses.
+        configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
         _session = [NSURLSession sessionWithConfiguration:configuration];
         _memoryCache = [[NSCache alloc] init];
         _memoryCache.countLimit = kLumiImageCacheLimit;

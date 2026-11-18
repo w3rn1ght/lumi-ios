@@ -550,6 +550,8 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 @property (nonatomic, assign) BOOL speakerIndexBuilt;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIImage *> *speakerImages;
 @property (nonatomic, assign) BOOL speakerReloadScheduled;
+@property (nonatomic, assign) BOOL speakerImageRetryScheduled;
+@property (nonatomic, assign) NSUInteger speakerImageRetryRounds;
 @property (nonatomic, assign) BOOL streamFlushScheduled;
 @property (nonatomic, assign) NSUInteger streamFlushToken;
 @property (nonatomic, assign) BOOL streamDirty;
@@ -926,6 +928,10 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         }
         [[LumiImageLoader sharedLoader] loadURLString:avatar completion:^(UIImage *image) {
             if (!image) {
+                // At launch the image session competes with the catalog crawl,
+                // so the first burst of portrait requests can time out. Without
+                // a retry the inline portrait stayed blank for the whole chat.
+                [self scheduleSpeakerImageRetry];
                 return;
             }
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -938,6 +944,23 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
             });
         }];
     }
+}
+
+- (void)scheduleSpeakerImageRetry {
+    if (self.speakerImageRetryScheduled || self.speakerImageRetryRounds >= 3) {
+        return;
+    }
+    self.speakerImageRetryScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        LumiChatViewController *strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        strongSelf.speakerImageRetryScheduled = NO;
+        strongSelf.speakerImageRetryRounds += 1;
+        [strongSelf prepareSpeakerImages];
+    });
 }
 
 - (void)scheduleSpeakerReload {
