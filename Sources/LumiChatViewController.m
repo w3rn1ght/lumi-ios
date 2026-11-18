@@ -446,7 +446,13 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         self.variantPrevButton.alpha = safeIndex > 0 ? 1.0 : 0.3;
         self.variantNextButton.alpha = safeIndex < variantsCount - 1 ? 1.0 : 0.3;
     }
-    if (showVariants != !self.variantBottomConstraint.active) {
+    // Row height is driven by whichever constraint pins the cell content to
+    // `contentView.bottom`. `variantBottomConstraint.active == showVariants`
+    // means the layout already matches; anything else has to be swapped.
+    // (The old `showVariants != !active` test was always true for a fresh cell,
+    // so the bar was laid out *below* the row and could not be tapped.)
+    BOOL variantsPinned = self.variantBottomConstraint.active;
+    if (variantsPinned != showVariants) {
         self.bubbleBottomConstraint.active = !showVariants;
         self.variantBottomConstraint.active = showVariants;
     }
@@ -2004,7 +2010,9 @@ static const NSInteger kLumiPhotoSparkCost = 10;
     NSArray *photos = LumiPhotoURLsInMessage(@{}, content);
     message[@"photo_urls"] = photos.count ? photos : nil;
     message[@"pending"] = @NO;
-    [self reloadAllRows];
+    // Reloading the row (not just the table's heights) is what makes the new
+    // variant text and the ‹ n/m › bar appear right after a regeneration.
+    [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:(NSInteger)index inSection:0]]];
     [self scrollToBottomAnimated:YES];
 }
 
@@ -2030,7 +2038,7 @@ static const NSInteger kLumiPhotoSparkCost = 10;
     message[@"content"] = variants[next];
     NSArray *photos = LumiPhotoURLsInMessage(@{}, variants[next]);
     message[@"photo_urls"] = photos.count ? photos : nil;
-    [self reloadAllRows];
+    [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:row inSection:0]]];
 
     __weak typeof(self) weakSelf = self;
     [[LumiAPI sharedClient] setActiveVariantIndex:next
@@ -2050,7 +2058,7 @@ static const NSInteger kLumiPhotoSparkCost = 10;
         currentMessage[@"content"] = variants[current];
         NSArray *currentPhotos = LumiPhotoURLsInMessage(@{}, variants[current]);
         currentMessage[@"photo_urls"] = currentPhotos.count ? currentPhotos : nil;
-        [weakSelf reloadAllRows];
+        [weakSelf safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:(NSInteger)index inSection:0]]];
     }];
 }
 
