@@ -462,6 +462,18 @@ static NSString *LumiEncodePath(NSString *path) {
 
 #pragma mark - Catalog
 
+/// The catalog endpoints filter their contents for the native app build: with
+/// `X-Lumi-Client: ios-app` the API returns 930 of ~1995 characters (10 cursor
+/// pages instead of 20, 171 of 399 stories), because of the App Store content
+/// rules. This client mirrors the website, so every catalog request identifies
+/// as the web client and the full catalog is downloaded.
+static NSString *const kLumiCatalogClient = @"web";
+
+static NSMutableURLRequest *LumiAsCatalogRequest(NSMutableURLRequest *request) {
+    [request setValue:kLumiCatalogClient forHTTPHeaderField:@"X-Lumi-Client"];
+    return request;
+}
+
 - (void)fetchCharacterIDsWithCompletion:(LumiAPICompletion)completion {
     [self fetchIDListWithPublicPath:@"/public/characters?limit=1000"
                     authenticatedPath:@"/characters?limit=1000"
@@ -477,11 +489,11 @@ static NSString *LumiEncodePath(NSString *path) {
 - (void)fetchIDListWithPublicPath:(NSString *)publicPath
                 authenticatedPath:(NSString *)authenticatedPath
                        completion:(LumiAPICompletion)completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:publicPath
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:40.0];
+    NSMutableURLRequest *request = LumiAsCatalogRequest([self requestWithMethod:@"GET"
+                                                                          path:publicPath
+                                                                       baseURL:kAPIBaseURL
+                                                                          body:nil
+                                                                       timeout:40.0]);
     [self performRequest:request completion:^(id result, NSError *error) {
         id items = [result isKindOfClass:[NSDictionary class]] ? result[@"items"] : nil;
         if ([items isKindOfClass:[NSArray class]]) {
@@ -493,11 +505,11 @@ static NSString *LumiEncodePath(NSString *path) {
             completion(nil, error ?: LumiError(500, @"Не удалось загрузить каталог"));
             return;
         }
-        NSMutableURLRequest *retry = [self requestWithMethod:@"GET"
-                                                       path:authenticatedPath
-                                                    baseURL:kAPIBaseURL
-                                                       body:nil
-                                                    timeout:40.0];
+        NSMutableURLRequest *retry = LumiAsCatalogRequest([self requestWithMethod:@"GET"
+                                                                            path:authenticatedPath
+                                                                         baseURL:kAPIBaseURL
+                                                                            body:nil
+                                                                         timeout:40.0]);
         [self performRequest:retry completion:^(id retryResult, NSError *retryError) {
             id retryItems = [retryResult isKindOfClass:[NSDictionary class]] ? retryResult[@"items"] : nil;
             if ([retryItems isKindOfClass:[NSArray class]]) {
@@ -513,11 +525,11 @@ static NSString *LumiEncodePath(NSString *path) {
                          completion:(LumiAPICompletion)completion {
     NSString *path = [NSString stringWithFormat:@"/characters?scope=all&fields=card&limit=100&sort=popular%@",
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                      path:path
-                                                   baseURL:kAPIBaseURL
-                                                      body:nil
-                                                   timeout:40.0];
+    NSMutableURLRequest *request = LumiAsCatalogRequest([self requestWithMethod:@"GET"
+                                                                          path:path
+                                                                       baseURL:kAPIBaseURL
+                                                                          body:nil
+                                                                       timeout:40.0]);
     [self performRequest:request completion:completion];
 }
 
@@ -525,11 +537,11 @@ static NSString *LumiEncodePath(NSString *path) {
                      completion:(LumiAPICompletion)completion {
     NSString *path = [NSString stringWithFormat:@"/stories?scope=all&fields=card&limit=100&sort=popular%@",
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                      path:path
-                                                   baseURL:kAPIBaseURL
-                                                      body:nil
-                                                   timeout:40.0];
+    NSMutableURLRequest *request = LumiAsCatalogRequest([self requestWithMethod:@"GET"
+                                                                          path:path
+                                                                       baseURL:kAPIBaseURL
+                                                                          body:nil
+                                                                       timeout:40.0]);
     [self performRequest:request completion:completion];
 }
 
@@ -553,11 +565,11 @@ static NSString *LumiEncodePath(NSString *path) {
                       (long)limit,
                       LumiEncodeQueryValue(sort.length ? sort : @"popular"),
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                      path:path
-                                                   baseURL:kAPIBaseURL
-                                                      body:nil
-                                                   timeout:40.0];
+    NSMutableURLRequest *request = LumiAsCatalogRequest([self requestWithMethod:@"GET"
+                                                                          path:path
+                                                                       baseURL:kAPIBaseURL
+                                                                          body:nil
+                                                                       timeout:40.0]);
     [self performRequest:request completion:completion];
 }
 
@@ -569,11 +581,11 @@ static NSString *LumiEncodePath(NSString *path) {
                       (long)limit,
                       LumiEncodeQueryValue(sort.length ? sort : @"popular"),
                       cursor ? [NSString stringWithFormat:@"&cursor=%@", LumiEncodeQueryValue(cursor)] : @""];
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                      path:path
-                                                   baseURL:kAPIBaseURL
-                                                      body:nil
-                                                   timeout:40.0];
+    NSMutableURLRequest *request = LumiAsCatalogRequest([self requestWithMethod:@"GET"
+                                                                          path:path
+                                                                       baseURL:kAPIBaseURL
+                                                                          body:nil
+                                                                       timeout:40.0]);
     [self performRequest:request completion:completion];
 }
 
@@ -592,11 +604,11 @@ static NSString *LumiEncodePath(NSString *path) {
 - (void)fetchDetailWithPublicPath:(NSString *)publicPath
                 authenticatedPath:(NSString *)authenticatedPath
                        completion:(LumiAPICompletion)completion {
-    NSMutableURLRequest *request = [self requestWithMethod:@"GET"
-                                                     path:publicPath
-                                                  baseURL:kAPIBaseURL
-                                                     body:nil
-                                                  timeout:25.0];
+    NSMutableURLRequest *request = LumiAsCatalogRequest([self requestWithMethod:@"GET"
+                                                                          path:publicPath
+                                                                       baseURL:kAPIBaseURL
+                                                                          body:nil
+                                                                       timeout:25.0]);
     [self performRequest:request completion:^(id result, NSError *error) {
         if (!error && [result isKindOfClass:[NSDictionary class]]) {
             completion(result, nil);
@@ -612,11 +624,11 @@ static NSString *LumiEncodePath(NSString *path) {
             return;
         }
         if ((error.code == 401 || error.code == 403) && [self isAuthenticated]) {
-            NSMutableURLRequest *retry = [self requestWithMethod:@"GET"
-                                                           path:authenticatedPath
-                                                        baseURL:kAPIBaseURL
-                                                           body:nil
-                                                        timeout:25.0];
+            NSMutableURLRequest *retry = LumiAsCatalogRequest([self requestWithMethod:@"GET"
+                                                                                path:authenticatedPath
+                                                                             baseURL:kAPIBaseURL
+                                                                                body:nil
+                                                                             timeout:25.0]);
             [self performRequest:retry completion:completion];
             return;
         }
@@ -751,7 +763,9 @@ static const double kLumiLaneDeadline = 6.5;
             @"X-Lang": @"ru",
             @"Origin": kWebOrigin,
             @"Referer": [kWebOrigin stringByAppendingString:@"/"],
-            @"X-Lumi-Client": @"ios-app",
+            // Must match the catalog sweep, otherwise cards that the app-filtered
+            // catalog hides cannot be resolved by id.
+            @"X-Lumi-Client": kLumiCatalogClient,
         };
         NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
         @synchronized (gate) {

@@ -202,31 +202,32 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         self.variantBar = [[UIStackView alloc] init];
         self.variantBar.translatesAutoresizingMaskIntoConstraints = NO;
         self.variantBar.axis = UILayoutConstraintAxisHorizontal;
-        self.variantBar.spacing = 6.0;
+        self.variantBar.spacing = 4.0;
         self.variantBar.alignment = UIStackViewAlignmentCenter;
         self.variantBar.hidden = YES;
         [self.contentView addSubview:self.variantBar];
 
         self.variantPrevButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [self.variantPrevButton setTitle:@"‹" forState:UIControlStateNormal];
-        self.variantPrevButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
+        self.variantPrevButton.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
         [self.variantPrevButton setTitleColor:LumiAccentColor() forState:UIControlStateNormal];
         [self.variantPrevButton addTarget:self action:@selector(variantPrevTapped) forControlEvents:UIControlEventTouchUpInside];
-        [self.variantPrevButton.widthAnchor constraintEqualToConstant:26.0].active = YES;
-        [self.variantPrevButton.heightAnchor constraintEqualToConstant:26.0].active = YES;
+        [self.variantPrevButton.widthAnchor constraintEqualToConstant:24.0].active = YES;
+        [self.variantPrevButton.heightAnchor constraintEqualToConstant:24.0].active = YES;
 
         self.variantLabel = [[UILabel alloc] init];
         self.variantLabel.font = LumiFont(11.0, UIFontWeightMedium);
         self.variantLabel.textColor = LumiMutedColor();
         self.variantLabel.textAlignment = NSTextAlignmentCenter;
+        [self.variantLabel.widthAnchor constraintGreaterThanOrEqualToConstant:30.0].active = YES;
 
         self.variantNextButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [self.variantNextButton setTitle:@"›" forState:UIControlStateNormal];
-        self.variantNextButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
+        self.variantNextButton.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
         [self.variantNextButton setTitleColor:LumiAccentColor() forState:UIControlStateNormal];
         [self.variantNextButton addTarget:self action:@selector(variantNextTapped) forControlEvents:UIControlEventTouchUpInside];
-        [self.variantNextButton.widthAnchor constraintEqualToConstant:26.0].active = YES;
-        [self.variantNextButton.heightAnchor constraintEqualToConstant:26.0].active = YES;
+        [self.variantNextButton.widthAnchor constraintEqualToConstant:24.0].active = YES;
+        [self.variantNextButton.heightAnchor constraintEqualToConstant:24.0].active = YES;
 
         [self.variantBar addArrangedSubview:self.variantPrevButton];
         [self.variantBar addArrangedSubview:self.variantLabel];
@@ -274,8 +275,10 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
             self.photoStackHeightConstraint,
             self.bubbleBottomConstraint,
 
-            [self.variantBar.topAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:2.0],
-            [self.variantBar.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:2.0],
+            // The variant arrows live in the avatar gutter, directly under the
+            // character icon, instead of hugging the bubble's left edge.
+            [self.variantBar.topAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:4.0],
+            [self.variantBar.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:12.0],
 
             [self.avatarButton.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:12.0],
             [self.avatarButton.topAnchor constraintEqualToAnchor:self.bubble.topAnchor constant:2.0],
