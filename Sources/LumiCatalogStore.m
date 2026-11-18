@@ -11,13 +11,6 @@ static const NSUInteger kDetailConcurrency = 14;
 static const NSUInteger kDetailInitialWorkers = 10;
 static const NSUInteger kDetailMinimumWorkers = 3;
 
-/// Local error helper (LumiError is private to LumiAPI.m).
-static NSError *LumiCatalogError(NSInteger code, NSString *message) {
-    return [NSError errorWithDomain:LumiAPIErrorDomain
-                                code:code
-                            userInfo:@{NSLocalizedDescriptionKey: message ?: @"Ошибка"}];
-}
-
 typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     LumiCatalogSyncKindCharacter = 0,
     LumiCatalogSyncKindStory = 1,
@@ -54,8 +47,20 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 @property (nonatomic, assign) NSTimeInterval lastNotifyTime;
 @property (nonatomic, assign) NSUInteger characterRetryRounds;
 @property (nonatomic, assign) BOOL pendingCharacterRetry;
-/// YES when the cache was built from the authenticated cursor-paged endpoints,
-/// which return the full catalog instead of the public 1000-item preview.
+- (void)fetchAllCardsWithKind:(NSString *)kind
+                     expected:(NSUInteger)expected
+                   completion:(void (^)(NSArray<NSDictionary *> *cards, NSError *error))completion;
+- (void)fetchCardsWithKind:(NSString *)kind
+                      sort:(NSString *)sort
+                    cursor:(NSString *)cursor
+                   attempt:(NSUInteger)attempt
+                      page:(NSUInteger)page
+                      seen:(NSMutableSet<NSString *> *)seen
+                     cards:(NSMutableArray<NSDictionary *> *)cards
+                completion:(void (^)(NSError *error))completion;
+- (void)applyCharacterCards:(NSArray<NSDictionary *> *)cards publicIDs:(NSArray<NSString *> *)publicIDs;
+- (void)applyStoryCards:(NSArray<NSDictionary *> *)cards publicIDs:(NSArray<NSString *> *)publicIDs;
+- (void)finishCharacterPhase;
 @end
 
 @implementation LumiCatalogStore
@@ -90,8 +95,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     return !self.isSyncing && self.syncStatus.length > 0;
 }
 
-- (NSString *)syncPercentString {
-    if (self.syncTotalCount == 0) {
+- (NSString *)syncPercentString {    if (self.syncTotalCount == 0) {
         return self.isSyncing ? @"0%" : @"100%";
     }
     double ratio = (double)self.syncCompletedCount / (double)self.syncTotalCount;
@@ -213,9 +217,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     NSString *base = [paths firstObject] ?: NSTemporaryDirectory();
     NSString *directory = [base stringByAppendingPathComponent:@"Lumi"];
     [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                       error:NULL];
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:NULL];
     return [directory stringByAppendingPathComponent:kCatalogFileName];
 }
 
@@ -310,6 +314,12 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     @synchronized (self) {
         self.notifyScheduled = NO;
     }
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:LumiCatalogDidUpdateNotification object:self];
+        });
+        return;
+    }
     [[NSNotificationCenter defaultCenter] postNotificationName:LumiCatalogDidUpdateNotification object:self];
 }
 
@@ -345,7 +355,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.syncPhase = @"Персонажи";
     self.syncStatus = nil;
     [self notifyUpdateNow];
-    [self syncCharacterIDs];
+    [self syncCharactersWithCursor];
 }
 
 - (void)forceRefresh {
@@ -356,7 +366,7 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     self.pendingCharacterRetry = NO;
     [self startSyncWithPhase:@"Подготовка"];
     [self syncTags];
-    [self syncCharacterIDs];
+    [self syncCharactersWithCursor];
 }
 
 - (void)syncTags {
@@ -457,9 +467,9 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     __weak typeof(self) weakSelf = self;
     [self syncDetailsForIDs:missing
                        kind:LumiCatalogSyncKindCharacter
-               alreadyDone:known.count
-              overallTotal:ids.count
-                completion:^(NSUInteger failed) {
+                alreadyDone:known.count
+               overallTotal:ids.count
+                 completion:^(NSUInteger failed) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
             return;
@@ -513,135 +523,344 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     if (failed > 0) {
         [self scheduleCharacterRetry];
     }
-    [self syncStoryIDs];
+    [self syncStoriesWithCursor];
 }
 
-- (void)syncCharacterIDs {
+/// Cursor-paged cards with per-page retries. A single failed page used to end
+/// the sweep silently: the catalog then stopped at ~930 characters, which is
+/// exactly what the device log showed. Every page is retried twice with a short
+/// backoff, and when the sweep still comes up short a second `newest` pass fills
+/// the gaps. Returns everything it collected.
+- (void)fetchAllCardsWithKind:(NSString *)kind
+                     expected:(NSUInteger)expected
+                   completion:(void (^)(NSArray<NSDictionary *> *cards, NSError *error))completion {
+    NSMutableArray<NSDictionary *> *cards = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    __weak typeof(self) weakSelf = self;
+
+    void (^finish)(NSError *) = ^(NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        BOOL incomplete = error != nil || (expected > 0 && cards.count < expected);
+        if (!incomplete) {
+            completion([cards copy], error);
+            return;
+        }
+        [LumiDiagnostics log:@"каталог: %@ — %lu карточек%@, повтор по новизне",
+         kind, (unsigned long)cards.count,
+         error ? [NSString stringWithFormat:@", ошибка %@", error.localizedDescription ?: @"?"] : @""];
+        [strongSelf fetchCardsWithKind:kind
+                                  sort:@"newest"
+                                cursor:nil
+                               attempt:0
+                                  page:0
+                                  seen:seen
+                                 cards:cards
+                            completion:^(NSError *secondError) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (!innerSelf) {
+                return;
+            }
+            [LumiDiagnostics log:@"каталог: %@ — %lu уникальных карточек после повтора",
+             kind, (unsigned long)cards.count];
+            completion([cards copy], secondError ?: error);
+        }];
+    };
+
+    [self fetchCardsWithKind:kind
+                        sort:@"popular"
+                      cursor:nil
+                     attempt:0
+                        page:0
+                        seen:seen
+                       cards:cards
+                  completion:finish];
+}
+
+- (void)fetchCardsWithKind:(NSString *)kind
+                      sort:(NSString *)sort
+                    cursor:(NSString *)cursor
+                   attempt:(NSUInteger)attempt
+                      page:(NSUInteger)page
+                      seen:(NSMutableSet<NSString *> *)seen
+                     cards:(NSMutableArray<NSDictionary *> *)cards
+                completion:(void (^)(NSError *error))completion {
+    const NSUInteger maxPages = 60;
+    const NSUInteger maxAttempts = 2;
+    __weak typeof(self) weakSelf = self;
+    LumiAPICompletion handle = ^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSDictionary *dictionary = LumiAsDictionary(result);
+        NSArray *items = LumiAsArray(dictionary[@"items"]);
+        if (!items) {
+            items = LumiAsArray(result);
+        }
+        // A missing `items` array (a 5xx body, a timeout, an HTML error page)
+        // is not an empty last page: retry it instead of ending the sweep.
+        BOOL failed = (error != nil) || (items == nil);
+        if (failed && attempt < maxAttempts) {
+            NSTimeInterval delay = 2.0 * (NSTimeInterval)(attempt + 1);
+            NSLog(@"[Lumi] catalog: %@ %@ page %lu attempt %lu failed (%@) — retry in %.0f s",
+                  kind, sort, (unsigned long)(page + 1), (unsigned long)(attempt + 1),
+                  error.localizedDescription ?: @"пустой ответ", delay);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) retrySelf = weakSelf;
+                if (!retrySelf) {
+                    return;
+                }
+                [retrySelf fetchCardsWithKind:kind
+                                         sort:sort
+                                       cursor:cursor
+                                      attempt:attempt + 1
+                                         page:page
+                                         seen:seen
+                                        cards:cards
+                                   completion:completion];
+            });
+            return;
+        }
+
+        for (NSDictionary *item in items) {
+            NSString *identifier = LumiAsString(item[@"id"]);
+            if (identifier.length && ![seen containsObject:identifier]) {
+                [seen addObject:identifier];
+                [cards addObject:item];
+            }
+        }
+
+        NSString *nextCursor = LumiAsString(dictionary[@"next_cursor"])
+            ?: LumiAsString(dictionary[@"nextCursor"])
+            ?: LumiAsString(dictionary[@"next"]);
+        NSUInteger nextPage = page + 1;
+        BOOL repeated = nextCursor.length > 0 && [nextCursor isEqualToString:(cursor ?: @"")];
+        if (!failed && nextCursor.length > 0 && !repeated && nextPage < maxPages) {
+            [strongSelf fetchCardsWithKind:kind
+                                     sort:sort
+                                   cursor:nextCursor
+                                  attempt:0
+                                     page:nextPage
+                                     seen:seen
+                                    cards:cards
+                               completion:completion];
+            return;
+        }
+        if (failed) {
+            NSLog(@"[Lumi] catalog: %@ %@ page %lu gave up — %@",
+                  kind, sort, (unsigned long)(page + 1), error.localizedDescription ?: @"пустой ответ");
+        }
+        completion(error);
+    };
+    if ([kind isEqualToString:@"characters"]) {
+        [self.api fetchCharacterCardsWithCursor:cursor limit:100 sort:sort completion:handle];
+    } else {
+        [self.api fetchStoryCardsWithCursor:cursor limit:100 sort:sort completion:handle];
+    }
+}
+
+- (void)syncCharactersWithCursor {
     [self updateProgressWithPhase:@"Персонажи" phaseDone:0 phaseTotal:0];
     [self recalculateProgress];
     [self notifyUpdate];
-    
+
     __weak typeof(self) weakSelf = self;
-    [self fetchAllCatalogCardsWithKind:@"characters"
-                          completion:^(NSArray<NSDictionary *> * _Nullable allCards, NSError * _Nullable error) {
+    // 1. The public ID list always answers and covers the first 1000 cards;
+    //    it is the safety net when the session cannot use /characters.
+    [self.api fetchCharacterIDsWithCompletion:^(id result, NSError *error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        
-        if (error || !allCards) {
-            [strongSelf failSyncWithError:error fallback:@"Не удалось загрузить список персонажей"];
+        if (!strongSelf) {
             return;
         }
-        
-        strongSelf.totalCharacterCount = allCards.count;
-        strongSelf.characters = [strongSelf sortedCharacters:allCards];
-        strongSelf.syncedCharacterCount = allCards.count;
-        [strongSelf updateProgressWithPhase:@"Персонажи" phaseDone:allCards.count phaseTotal:allCards.count];
-        [strongSelf recalculateProgress];
-        [strongSelf notifyUpdate];
-        
-        NSLog(@"[Lumi] catalog: %lu персонажей загружено", (unsigned long)allCards.count);
-        [LumiDiagnostics log:@"каталог: %lu персонажей загружено", (unsigned long)allCards.count];
-        
-        [strongSelf syncStoryIDs];
+        NSArray<NSString *> *publicIDs = [strongSelf identifiersFromItems:LumiAsArray(result) ?: @[]];
+        [LumiDiagnostics log:@"каталог: публичный список — %lu персонажей", (unsigned long)publicIDs.count];
+
+        // 2. Full cards (authenticated, cursor paged). Whole catalog when the
+        //    session allows it; partial results are completed below.
+        [strongSelf fetchAllCardsWithKind:@"characters"
+                                 expected:publicIDs.count
+                               completion:^(NSArray<NSDictionary *> *cards, NSError *cardsError) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (!innerSelf) {
+                return;
+            }
+            if (cardsError) {
+                [LumiDiagnostics log:@"каталог: полные карточки недоступны (%@) — использую публичные",
+                 cardsError.localizedDescription ?: @"ошибка"];
+            }
+            [innerSelf applyCharacterCards:cards publicIDs:publicIDs];
+        }];
     }];
 }
 
-- (void)fetchAllCatalogCardsWithKind:(NSString *)kind
-                          completion:(void (^)(NSArray<NSDictionary *> * _Nullable allCards, NSError * _Nullable error))completion {
-    NSMutableArray *allCards = [NSMutableArray array];
-    __block NSString *cursor = @"";
+- (void)applyCharacterCards:(NSArray<NSDictionary *> *)cards publicIDs:(NSArray<NSString *> *)publicIDs {
+    NSMutableDictionary<NSString *, NSDictionary *> *byID = [NSMutableDictionary dictionary];
+    for (NSDictionary *card in cards) {
+        NSString *identifier = LumiAsString(card[@"id"]);
+        // A card without a name is the id-only preview from /public/characters;
+        // treat it as missing so the detail pass fills in the real data.
+        if (identifier.length && LumiAsString(card[@"name"]).length) {
+            byID[identifier] = card;
+        }
+    }
+    if (byID.count) {
+        self.characters = [self sortedCharacters:byID.allValues];
+    }
+    // Cards that the cursor sweep returned without a name still belong in the
+    // catalog: the detail pass is what gives them a name.
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    NSMutableSet<NSString *> *queued = [NSMutableSet set];
+    for (NSString *identifier in publicIDs) {
+        if (identifier.length && !byID[identifier] && ![queued containsObject:identifier]) {
+            [queued addObject:identifier];
+            [missing addObject:identifier];
+        }
+    }
+    for (NSDictionary *card in cards) {
+        NSString *identifier = LumiAsString(card[@"id"]);
+        if (identifier.length && !byID[identifier] && ![queued containsObject:identifier]) {
+            [queued addObject:identifier];
+            [missing addObject:identifier];
+        }
+    }
+    NSUInteger total = MAX(publicIDs.count, MAX(byID.count + missing.count, byID.count));
+    self.totalCharacterCount = MAX(self.totalCharacterCount, total);
+    self.syncedCharacterCount = self.characters.count;
+    [self updateProgressWithPhase:@"Персонажи"
+                        phaseDone:self.characters.count
+                       phaseTotal:self.totalCharacterCount];
+    [self recalculateProgress];
+    [self notifyUpdate];
+
+    NSLog(@"[Lumi] catalog: %lu карточек, %lu публичных id, %lu без карточки",
+          (unsigned long)byID.count, (unsigned long)publicIDs.count, (unsigned long)missing.count);
+    [LumiDiagnostics log:@"каталог: %lu карточек, %lu id без данных",
+     (unsigned long)byID.count, (unsigned long)missing.count];
+
+    if (!missing.count) {
+        [self finishCharacterPhase];
+        return;
+    }
+
     __weak typeof(self) weakSelf = self;
-    
-    __block void (^fetchPage)(void);
-    __weak void (^weakFetchPage)(void) = fetchPage;
-    fetchPage = ^{
+    [self syncDetailsForIDs:missing
+                       kind:LumiCatalogSyncKindCharacter
+                alreadyDone:byID.count
+               overallTotal:MAX(self.totalCharacterCount, byID.count + missing.count)
+                 completion:^(NSUInteger failed) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
-            completion(nil, LumiCatalogError(500, @"Синхронизация отменена"));
             return;
         }
-        
-        void (^fetchCompletion)(id, NSError *) = ^(id result, NSError *error) {
-            __strong typeof(weakSelf) sSelf = weakSelf;
-            if (!sSelf) {
-                completion(nil, LumiCatalogError(500, @"Синхронизация отменена"));
-                return;
-            }
-            
-            if (error) {
-                completion(nil, error);
-                return;
-            }
-            
-            NSDictionary *dictionary = [result isKindOfClass:[NSDictionary class]] ? result : nil;
-            NSArray *items = [dictionary[@"items"] isKindOfClass:[NSArray class]] ? dictionary[@"items"] : nil;
-            if (!items) {
-                completion(nil, LumiCatalogError(500, @"Некорректный ответ сервера"));
-                return;
-            }
-            
-            [allCards addObjectsFromArray:items];
-            
-            NSString *nextCursor = [dictionary[@"next_cursor"] isKindOfClass:[NSString class]]
-                ? dictionary[@"next_cursor"] : @"";
-            
-            if (nextCursor.length) {
-                cursor = nextCursor;
-                // Update progress periodically
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [weakSelf updateProgressWithPhase:kind phaseDone:allCards.count phaseTotal:0];
-                    [weakSelf notifyUpdate];
-                });
-                void (^strongFetchPage)(void) = weakFetchPage;
-                if (strongFetchPage) strongFetchPage();
-            } else {
-                completion([allCards copy], nil);
-            }
-        };
-        
-        if ([kind isEqualToString:@"characters"]) {
-            [strongSelf.api fetchCharacterCardsWithCursor:cursor limit:100 completion:fetchCompletion];
-        } else if ([kind isEqualToString:@"stories"]) {
-            [strongSelf.api fetchStoryCardsWithCursor:cursor limit:100 completion:fetchCompletion];
-        } else {
-            completion(nil, LumiCatalogError(500, @"Неизвестный тип каталога"));
+        if (failed > 0) {
+            [LumiDiagnostics log:@"каталог: %lu карточек персонажей не загрузилось", (unsigned long)failed];
         }
-    };
-    
-    weakFetchPage = fetchPage;
-    fetchPage();
+        [strongSelf finishCharacterPhase];
+    }];
 }
 
-- (void)syncStoryIDs {
+- (void)finishCharacterPhase {
+    NSUInteger count = self.characters.count;
+    self.syncedCharacterCount = count;
+    self.totalCharacterCount = MAX(self.totalCharacterCount, count);
+    [self updateProgressWithPhase:@"Персонажи" phaseDone:count phaseTotal:self.totalCharacterCount];
+    [self recalculateProgress];
+    [self saveCache];
+    [self notifyUpdate];
+
+    if (count == 0) {
+        [self failSyncWithError:nil fallback:@"Не удалось загрузить персонажей. Проверьте соединение."];
+        return;
+    }
+    [self syncStoriesWithCursor];
+}
+
+- (void)syncStoriesWithCursor {
     [self updateProgressWithPhase:@"Истории" phaseDone:0 phaseTotal:0];
     [self recalculateProgress];
     [self notifyUpdate];
-    
+
     __weak typeof(self) weakSelf = self;
-    [self fetchAllCatalogCardsWithKind:@"stories"
-                          completion:^(NSArray<NSDictionary *> * _Nullable allCards, NSError * _Nullable error) {
+    [self.api fetchStoryIDsWithCompletion:^(id result, NSError *error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        
-        if (error || !allCards) {
-            [strongSelf failSyncWithError:error fallback:@"Не удалось загрузить список историй"];
+        if (!strongSelf) {
             return;
         }
-        
-        strongSelf.totalStoryCount = allCards.count;
-        strongSelf.stories = [strongSelf sortedStories:allCards];
-        strongSelf.syncedStoryCount = allCards.count;
-        [strongSelf updateProgressWithPhase:@"Истории" phaseDone:allCards.count phaseTotal:allCards.count];
-        [strongSelf recalculateProgress];
-        [strongSelf notifyUpdate];
-        
-        NSLog(@"[Lumi] catalog: %lu историй загружено", (unsigned long)allCards.count);
-        [LumiDiagnostics log:@"каталог: %lu историй загружено", (unsigned long)allCards.count];
-        
-        [strongSelf finishSync];
+        NSArray<NSString *> *publicIDs = [strongSelf identifiersFromItems:LumiAsArray(result) ?: @[]];
+        [LumiDiagnostics log:@"каталог: публичный список — %lu историй", (unsigned long)publicIDs.count];
+
+        [strongSelf fetchAllCardsWithKind:@"stories"
+                                 expected:publicIDs.count
+                               completion:^(NSArray<NSDictionary *> *cards, NSError *cardsError) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (!innerSelf) {
+                return;
+            }
+            [innerSelf applyStoryCards:cards publicIDs:publicIDs];
+        }];
     }];
 }
 
+- (void)applyStoryCards:(NSArray<NSDictionary *> *)cards publicIDs:(NSArray<NSString *> *)publicIDs {
+    NSMutableDictionary<NSString *, NSDictionary *> *byID = [NSMutableDictionary dictionary];
+    for (NSDictionary *card in cards) {
+        NSString *identifier = LumiAsString(card[@"id"]);
+        if (identifier.length && LumiAsString(card[@"title"]).length) {
+            byID[identifier] = card;
+        }
+    }
+    if (byID.count) {
+        self.stories = [self sortedStories:byID.allValues];
+    }
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    NSMutableSet<NSString *> *queued = [NSMutableSet set];
+    for (NSString *identifier in publicIDs) {
+        if (identifier.length && !byID[identifier] && ![queued containsObject:identifier]) {
+            [queued addObject:identifier];
+            [missing addObject:identifier];
+        }
+    }
+    for (NSDictionary *card in cards) {
+        NSString *identifier = LumiAsString(card[@"id"]);
+        if (identifier.length && !byID[identifier] && ![queued containsObject:identifier]) {
+            [queued addObject:identifier];
+            [missing addObject:identifier];
+        }
+    }
+    NSUInteger total = MAX(publicIDs.count, MAX(byID.count + missing.count, byID.count));
+    self.totalStoryCount = MAX(self.totalStoryCount, total);
+    self.syncedStoryCount = self.stories.count;
+    [self updateProgressWithPhase:@"Истории"
+                        phaseDone:self.stories.count
+                       phaseTotal:self.totalStoryCount];
+    [self recalculateProgress];
+    [self notifyUpdate];
+
+    [LumiDiagnostics log:@"каталог: историй %lu, из них без карточки %lu",
+     (unsigned long)byID.count, (unsigned long)missing.count];
+
+    if (!missing.count) {
+        [self finishSync];
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    [self syncDetailsForIDs:missing
+                       kind:LumiCatalogSyncKindStory
+                alreadyDone:byID.count
+               overallTotal:MAX(self.totalStoryCount, byID.count + missing.count)
+                 completion:^(NSUInteger failed) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf finishSync];
+    }];
+}
 - (void)finishSync {
     self.isSyncing = NO;
     self.syncPhase = nil;
@@ -1091,10 +1310,10 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 #pragma mark - Queries
 
 - (NSArray<NSDictionary *> *)filterItems:(NSArray<NSDictionary *> *)items
-                                    query:(NSString *)query
-                                     tags:(NSArray<NSString *> *)tags
-                          primaryKeyName:(NSString *)primaryKey
-                        secondaryKeyName:(NSString *)secondaryKey {
+                                   query:(NSString *)query
+                                    tags:(NSArray<NSString *> *)tags
+                         primaryKeyName:(NSString *)primaryKey
+                       secondaryKeyName:(NSString *)secondaryKey {
     NSArray *sorted = [self sortedCharacters:items];
     NSMutableSet<NSString *> *wantedTags = [NSMutableSet set];
     for (NSString *tag in tags) {
@@ -1160,57 +1379,33 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
 }
 
 - (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query tag:(NSString *)tag {
-    return [self filterItems:self.characters
-                       query:query
-                        tags:@[tag]
-             primaryKeyName:@"name"
-           secondaryKeyName:@"tagline"];
+    return [self charactersMatchingQuery:query tags:(tag.length ? @[tag] : nil)];
 }
 
 - (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query tag:(NSString *)tag {
-    return [self filterItems:self.stories
-                       query:query
-                        tags:@[tag]
-             primaryKeyName:@"title"
-           secondaryKeyName:@"description"];
+    return [self storiesMatchingQuery:query tags:(tag.length ? @[tag] : nil)];
 }
 
-- (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query {
+- (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query tags:(NSArray<NSString *> *)tags {
     return [self filterItems:self.characters
                        query:query
-                        tags:@[]
+                        tags:tags ?: @[]
              primaryKeyName:@"name"
            secondaryKeyName:@"tagline"];
 }
 
-- (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query {
+- (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query tags:(NSArray<NSString *> *)tags {
     return [self filterItems:self.stories
                        query:query
-                        tags:@[]
+                        tags:tags ?: @[]
              primaryKeyName:@"title"
            secondaryKeyName:@"description"];
 }
 
-- (NSArray<NSDictionary *> *)charactersMatchingQuery:(NSString *)query
-                                                 tags:(NSArray<NSString *> *)tags {
-    return [self filterItems:self.characters
-                       query:query
-                        tags:tags
-             primaryKeyName:@"name"
-           secondaryKeyName:@"tagline"];
-}
-
-- (NSArray<NSDictionary *> *)storiesMatchingQuery:(NSString *)query
-                                              tags:(NSArray<NSString *> *)tags {
-    return [self filterItems:self.stories
-                       query:query
-                        tags:tags
-             primaryKeyName:@"title"
-           secondaryKeyName:@"description"];
-}
-
-- (nullable NSDictionary *)characterWithID:(nullable NSString *)identifier {
-    if (!identifier.length) return nil;
+- (NSDictionary *)characterWithID:(NSString *)identifier {
+    if (!identifier.length) {
+        return nil;
+    }
     for (NSDictionary *character in self.characters) {
         if ([character[@"id"] isEqual:identifier]) {
             return character;
@@ -1219,8 +1414,10 @@ typedef NS_ENUM(NSInteger, LumiCatalogSyncKind) {
     return nil;
 }
 
-- (nullable NSDictionary *)storyWithID:(nullable NSString *)identifier {
-    if (!identifier.length) return nil;
+- (NSDictionary *)storyWithID:(NSString *)identifier {
+    if (!identifier.length) {
+        return nil;
+    }
     for (NSDictionary *story in self.stories) {
         if ([story[@"id"] isEqual:identifier]) {
             return story;

@@ -1,6 +1,11 @@
-[build-17]
-Package: lumi
-Version: 1.4.9
-MinimumOSVersion: 12.0
-Description: Lumi for iOS 12.
-Multi-genre support, improved catalog loading, fixed chat titles.
+Package: com.w3rn1ght.lumi
+Name: Lumi
+Version: 1.6.1
+Architecture: iphoneos-arm
+Description: Native API client for Lumi.ai, built for jailbroken iOS 12 devices. Full catalog, stories, genres, search, synced chats, WebP avatars.
+Homepage: https://lumi.site
+Maintainer: w3rn1ght
+Author: w3rn1ght
+Section: Applications
+Depends: firmware (>= 12.0)
+Icon: file:///Applications/Lumi.app/Icon-60@2x.png

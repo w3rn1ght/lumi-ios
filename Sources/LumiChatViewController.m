@@ -2,7 +2,10 @@
 #import "LumiAPI.h"
 #import <math.h>
 #import "LumiCatalogStore.h"
+#import "LumiChatAppearance.h"
+#import "LumiChatInfoViewController.h"
 #import "LumiImageLoader.h"
+#import "LumiImageViewerViewController.h"
 #import "LumiRichText.h"
 #import "LumiSafe.h"
 #import "LumiDiagnostics.h"
@@ -46,6 +49,29 @@ static CGFloat LumiPhotoHeightForRatio(CGFloat ratio, CGFloat width) {
     }
     CGFloat height = width * ratio;
     return MIN(MAX(height, 96.0), 420.0);
+}
+
+/// `**Кума** улыбается` -> "Кума". Used to find the speaker's avatar in the
+/// catalog for story chats with several characters.
+static NSString *LumiSpeakerKey(NSString *name) {
+    NSString *trimmed = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSCharacterSet *trailing = [NSCharacterSet characterSetWithCharactersInString:@":;,.!?—–-«»\"' \t"];
+    while (trimmed.length && [trailing characterIsMember:[trimmed characterAtIndex:trimmed.length - 1]]) {
+        trimmed = [trimmed substringToIndex:trimmed.length - 1];
+    }
+    return trimmed;
+}
+
+static NSString *LumiLeadingBoldName(NSString *text) {
+    if (![text hasPrefix:@"**"] || text.length < 5) {
+        return nil;
+    }
+    NSRange close = [text rangeOfString:@"**" options:0 range:NSMakeRange(2, text.length - 2)];
+    if (close.location == NSNotFound || close.location == 2) {
+        return nil;
+    }
+    NSString *name = LumiSpeakerKey([text substringWithRange:NSMakeRange(2, close.location - 2)]);
+    return name.length ? name : nil;
 }
 
 @interface LumiPhotoView : UIImageView
@@ -103,6 +129,9 @@ static CGFloat LumiPhotoHeightForRatio(CGFloat ratio, CGFloat width) {
 @property (nonatomic, strong) NSArray<NSLayoutConstraint *> *photoHeightConstraints;
 @property (nonatomic, strong) NSLayoutConstraint *leadingConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *trailingConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *bubbleAfterAvatarConstraint;
+@property (nonatomic, strong) UIButton *avatarButton;
+@property (nonatomic, strong) UIImageView *avatarImageView;
 @property (nonatomic, strong) NSLayoutConstraint *photoStackHeightConstraint;
 @property (nonatomic, strong) UIStackView *variantBar;
 @property (nonatomic, strong) UIButton *variantPrevButton;
@@ -112,6 +141,7 @@ static CGFloat LumiPhotoHeightForRatio(CGFloat ratio, CGFloat width) {
 @property (nonatomic, strong) NSLayoutConstraint *variantBottomConstraint;
 @property (nonatomic, weak) UITableView *hostTableView;
 @property (nonatomic, copy, nullable) void (^longPressHandler)(void);
+@property (nonatomic, copy, nullable) void (^avatarTapHandler)(void);
 @property (nonatomic, copy, nullable) void (^variantStepHandler)(NSInteger delta);
 @end
 
@@ -132,6 +162,31 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         self.bubble.layer.cornerRadius = 16.0;
         [self.contentView addSubview:self.bubble];
 
+        self.avatarButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        self.avatarButton.translatesAutoresizingMaskIntoConstraints = NO;
+        self.avatarButton.backgroundColor = LumiSurfaceColor();
+        self.avatarButton.layer.cornerRadius = 16.0;
+        self.avatarButton.clipsToBounds = YES;
+        self.avatarButton.hidden = YES;
+        [self.avatarButton addTarget:self action:@selector(avatarTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self.contentView addSubview:self.avatarButton];
+
+        // NOTE: never load remote images into UIButton.imageView — the button
+        // resets it on every layout pass. A dedicated subview keeps the image.
+        self.avatarImageView = [[UIImageView alloc] initWithFrame:CGRectZero];
+        self.avatarImageView.translatesAutoresizingMaskIntoConstraints = NO;
+        self.avatarImageView.contentMode = UIViewContentModeScaleAspectFill;
+        self.avatarImageView.clipsToBounds = YES;
+        self.avatarImageView.userInteractionEnabled = NO;
+        self.avatarImageView.image = [UIImage imageNamed:@"AvatarPlaceholder"];
+        [self.avatarButton addSubview:self.avatarImageView];
+        [NSLayoutConstraint activateConstraints:@[
+            [self.avatarImageView.topAnchor constraintEqualToAnchor:self.avatarButton.topAnchor],
+            [self.avatarImageView.leadingAnchor constraintEqualToAnchor:self.avatarButton.leadingAnchor],
+            [self.avatarImageView.trailingAnchor constraintEqualToAnchor:self.avatarButton.trailingAnchor],
+            [self.avatarImageView.bottomAnchor constraintEqualToAnchor:self.avatarButton.bottomAnchor],
+        ]];
+
         self.bubbleLabel = [[UILabel alloc] init];
         self.bubbleLabel.translatesAutoresizingMaskIntoConstraints = NO;
         self.bubbleLabel.numberOfLines = 0;
@@ -147,31 +202,32 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         self.variantBar = [[UIStackView alloc] init];
         self.variantBar.translatesAutoresizingMaskIntoConstraints = NO;
         self.variantBar.axis = UILayoutConstraintAxisHorizontal;
-        self.variantBar.spacing = 6.0;
+        self.variantBar.spacing = 4.0;
         self.variantBar.alignment = UIStackViewAlignmentCenter;
         self.variantBar.hidden = YES;
         [self.contentView addSubview:self.variantBar];
 
         self.variantPrevButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [self.variantPrevButton setTitle:@"‹" forState:UIControlStateNormal];
-        self.variantPrevButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
+        self.variantPrevButton.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
         [self.variantPrevButton setTitleColor:LumiAccentColor() forState:UIControlStateNormal];
         [self.variantPrevButton addTarget:self action:@selector(variantPrevTapped) forControlEvents:UIControlEventTouchUpInside];
-        [self.variantPrevButton.widthAnchor constraintEqualToConstant:26.0].active = YES;
-        [self.variantPrevButton.heightAnchor constraintEqualToConstant:26.0].active = YES;
+        [self.variantPrevButton.widthAnchor constraintEqualToConstant:24.0].active = YES;
+        [self.variantPrevButton.heightAnchor constraintEqualToConstant:24.0].active = YES;
 
         self.variantLabel = [[UILabel alloc] init];
         self.variantLabel.font = LumiFont(11.0, UIFontWeightMedium);
         self.variantLabel.textColor = LumiMutedColor();
         self.variantLabel.textAlignment = NSTextAlignmentCenter;
+        [self.variantLabel.widthAnchor constraintGreaterThanOrEqualToConstant:30.0].active = YES;
 
         self.variantNextButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [self.variantNextButton setTitle:@"›" forState:UIControlStateNormal];
-        self.variantNextButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
+        self.variantNextButton.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
         [self.variantNextButton setTitleColor:LumiAccentColor() forState:UIControlStateNormal];
         [self.variantNextButton addTarget:self action:@selector(variantNextTapped) forControlEvents:UIControlEventTouchUpInside];
-        [self.variantNextButton.widthAnchor constraintEqualToConstant:26.0].active = YES;
-        [self.variantNextButton.heightAnchor constraintEqualToConstant:26.0].active = YES;
+        [self.variantNextButton.widthAnchor constraintEqualToConstant:24.0].active = YES;
+        [self.variantNextButton.heightAnchor constraintEqualToConstant:24.0].active = YES;
 
         [self.variantBar addArrangedSubview:self.variantPrevButton];
         [self.variantBar addArrangedSubview:self.variantLabel];
@@ -197,6 +253,8 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
 
         self.leadingConstraint = [self.bubble.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:14.0];
         self.trailingConstraint = [self.bubble.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-14.0];
+        self.bubbleAfterAvatarConstraint = [self.bubble.leadingAnchor constraintEqualToAnchor:self.avatarButton.trailingAnchor constant:8.0];
+        self.bubbleAfterAvatarConstraint.active = NO;
         self.photoStackHeightConstraint = [self.photoStack.heightAnchor constraintEqualToConstant:0.0];
         self.bubbleBottomConstraint = [self.bubble.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4.0];
         self.variantBottomConstraint = [self.variantBar.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-4.0];
@@ -205,6 +263,7 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         [NSLayoutConstraint activateConstraints:@[
             [self.bubble.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:4.0],
             [self.bubble.widthAnchor constraintLessThanOrEqualToAnchor:self.contentView.widthAnchor multiplier:0.82],
+            [self.bubble.trailingAnchor constraintLessThanOrEqualToAnchor:self.contentView.trailingAnchor constant:-14.0],
             [self.bubbleLabel.topAnchor constraintEqualToAnchor:self.bubble.topAnchor constant:10.0],
             [self.bubbleLabel.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:13.0],
             [self.bubbleLabel.trailingAnchor constraintEqualToAnchor:self.bubble.trailingAnchor constant:-13.0],
@@ -216,8 +275,16 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
             self.photoStackHeightConstraint,
             self.bubbleBottomConstraint,
 
-            [self.variantBar.topAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:2.0],
-            [self.variantBar.leadingAnchor constraintEqualToAnchor:self.bubble.leadingAnchor constant:2.0],
+            // The variant arrows live in the avatar gutter, directly under the
+            // character icon, instead of hugging the bubble's left edge.
+            [self.variantBar.topAnchor constraintEqualToAnchor:self.bubble.bottomAnchor constant:4.0],
+            [self.variantBar.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:12.0],
+
+            [self.avatarButton.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:12.0],
+            [self.avatarButton.topAnchor constraintEqualToAnchor:self.bubble.topAnchor constant:2.0],
+            [self.avatarButton.widthAnchor constraintEqualToConstant:32.0],
+            [self.avatarButton.heightAnchor constraintEqualToConstant:32.0],
+            [self.avatarButton.bottomAnchor constraintLessThanOrEqualToAnchor:self.contentView.bottomAnchor constant:-4.0],
         ]];
     }
     return self;
@@ -239,6 +306,12 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
     self.bubbleBottomConstraint.active = YES;
     self.variantBottomConstraint.active = NO;
     self.longPressHandler = nil;
+    self.avatarTapHandler = nil;
+    self.avatarButton.hidden = YES;
+    self.avatarImageView.image = [UIImage imageNamed:@"AvatarPlaceholder"];
+    self.leadingConstraint.active = NO;
+    self.trailingConstraint.active = NO;
+    self.bubbleAfterAvatarConstraint.active = NO;
     self.variantStepHandler = nil;
 }
 
@@ -266,19 +339,35 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
                   pending:(BOOL)pending
                 photoURLs:(NSArray<NSString *> *)photoURLs
             variantsCount:(NSInteger)variantsCount
-              activeIndex:(NSInteger)activeIndex {
-    UIColor *textColor = isUser ? [UIColor whiteColor] : LumiTextColor();
+              activeIndex:(NSInteger)activeIndex
+                avatarURL:(NSString *)avatarURL
+            speakerImages:(NSDictionary<NSString *, UIImage *> *)speakerImages {
+    LumiChatAppearance *appearance = [LumiChatAppearance sharedAppearance];
+    UIColor *textColor = isUser ? appearance.userTextColor : appearance.characterTextColor;
     UIFont *baseFont = LumiFont(15.0, UIFontWeightRegular);
     NSString *displayText = text.length ? text : (pending ? @"…" : @"");
     NSString *visible = [LumiRichTextRenderer stringByStrippingImageMarkers:displayText] ?: @"";
     self.bubbleLabel.attributedText = [LumiRichTextRenderer attributedStringForText:visible
-                                                                         textColor:textColor
-                                                                          baseFont:baseFont
-                                                                 prefixCommandName:@"**"];
+                                                                          textColor:textColor
+                                                                           baseFont:baseFont
+                                                                          boldColor:appearance.boldColor
+                                                                        italicColor:appearance.italicColor
+                                                                      quoteTextColor:appearance.quoteTextColor
+                                                                      quoteFillColor:appearance.quoteFillColor
+                                                                       speakerImages:speakerImages];
     self.bubbleLabel.hidden = visible.length == 0 && photoURLs.count == 0;
 
-    self.bubble.backgroundColor = isUser ? LumiAccentColor() : LumiSurfaceColor();
-    self.leadingConstraint.active = !isUser;
+    self.bubble.backgroundColor = isUser ? appearance.userBubbleColor : appearance.characterBubbleColor;
+
+    BOOL showAvatar = !isUser && avatarURL.length > 0;
+    self.avatarButton.hidden = !showAvatar;
+    if (showAvatar) {
+        [[LumiImageLoader sharedLoader] loadURLString:avatarURL intoImageView:self.avatarImageView];
+    } else {
+        self.avatarImageView.image = [UIImage imageNamed:@"AvatarPlaceholder"];
+    }
+    self.leadingConstraint.active = !isUser && !showAvatar;
+    self.bubbleAfterAvatarConstraint.active = !isUser && showAvatar;
     self.trailingConstraint.active = isUser;
 
     CGFloat contentWidth = CGRectGetWidth(self.contentView.bounds);
@@ -332,7 +421,9 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
                 constraint.constant = newHeight;
                 [cell updatePhotoStackHeight];
                 UITableView *table = cell.hostTableView;
-                if (table.window) {
+                // Once per photo per message is enough; off-screen cells pick the
+                // new height up on their next layout pass.
+                if (table.window && [table indexPathForCell:cell]) {
                     [UIView performWithoutAnimation:^{
                         [table beginUpdates];
                         [table endUpdates];
@@ -355,7 +446,13 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
         self.variantPrevButton.alpha = safeIndex > 0 ? 1.0 : 0.3;
         self.variantNextButton.alpha = safeIndex < variantsCount - 1 ? 1.0 : 0.3;
     }
-    if (showVariants != !self.variantBottomConstraint.active) {
+    // Row height is driven by whichever constraint pins the cell content to
+    // `contentView.bottom`. `variantBottomConstraint.active == showVariants`
+    // means the layout already matches; anything else has to be swapped.
+    // (The old `showVariants != !active` test was always true for a fresh cell,
+    // so the bar was laid out *below* the row and could not be tapped.)
+    BOOL variantsPinned = self.variantBottomConstraint.active;
+    if (variantsPinned != showVariants) {
         self.bubbleBottomConstraint.active = !showVariants;
         self.variantBottomConstraint.active = showVariants;
     }
@@ -370,6 +467,12 @@ static const NSUInteger kLumiPhotosPerMessage = 4;
 - (void)variantNextTapped {
     if (self.variantStepHandler) {
         self.variantStepHandler(1);
+    }
+}
+
+- (void)avatarTapped {
+    if (self.avatarTapHandler) {
+        self.avatarTapHandler();
     }
 }
 
@@ -430,6 +533,8 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
 @interface LumiChatViewController () <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) NSDictionary *chat;
+@property (nonatomic, strong) NSDictionary *chatItem;
+@property (nonatomic, assign) LumiDetailKind chatKind;
 @property (nonatomic, copy) NSString *chatID;
 @property (nonatomic, copy) NSString *chatTitle;
 @property (nonatomic, copy, nullable) NSString *avatarURL;
@@ -450,6 +555,17 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) UILabel *stateLabel;
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *messages;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *speakerIndex;
+@property (nonatomic, assign) BOOL speakerIndexBuilt;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, UIImage *> *speakerImages;
+@property (nonatomic, assign) BOOL speakerReloadScheduled;
+@property (nonatomic, assign) BOOL speakerImageRetryScheduled;
+@property (nonatomic, assign) NSUInteger speakerImageRetryRounds;
+@property (nonatomic, assign) BOOL streamFlushScheduled;
+@property (nonatomic, assign) NSUInteger streamFlushToken;
+@property (nonatomic, assign) BOOL streamDirty;
+@property (nonatomic, assign) BOOL uiActive;
+@property (nonatomic, assign) BOOL readMarked;
 @property (nonatomic, assign) BOOL sending;
 @property (nonatomic, assign) BOOL loading;
 @property (nonatomic, assign) BOOL hasMore;
@@ -465,7 +581,10 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     if (self) {
         _chat = [self normalizedChat:chat];
         _chatID = [self chatIdentifierFromChat:chat] ?: @"";
+        _chatItem = [item copy] ?: @{};
+        _chatKind = kind;
         _messages = [NSMutableArray array];
+        _speakerImages = [NSMutableDictionary dictionary];
         NSDictionary *safeItem = LumiAsDictionary(item) ?: @{};
         if (kind == LumiDetailKindStory) {
             _chatTitle = LumiAsString(safeItem[@"title"]) ?: LumiAsString(_chat[@"title"]);
@@ -473,6 +592,8 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
             _chatTitle = LumiAsString(safeItem[@"name"]) ?: LumiAsString(_chat[@"title"]);
         }
         _avatarURL = LumiAsString(safeItem[@"avatar_url"]);
+        // Скрываем tab bar (Каталог/Чаты/Профиль) в экране чата
+        self.hidesBottomBarWhenPushed = YES;
     }
     return self;
 }
@@ -481,6 +602,19 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     [super viewDidLoad];
     self.view.backgroundColor = LumiBackgroundColor();
     [self refreshNavigationTitle];
+
+    UIButton *infoButton = [UIButton buttonWithType:UIButtonTypeInfoLight];
+    [infoButton addTarget:self action:@selector(infoTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:infoButton];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applyChatAppearance)
+                                                 name:LumiChatAppearanceDidChangeNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(catalogUpdated)
+                                                 name:LumiCatalogDidUpdateNotification
+                                               object:nil];
 
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -611,8 +745,30 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
     [LumiDiagnostics log:@"чат %@: открыт (%@), сообщений в списке: %lu",
      self.chatID, self.chatTitle ?: @"без названия", (unsigned long)self.messages.count];
+    [self applyChatAppearance];
     [self loadMessages];
+    [self loadSpeakerDetails];
     [self refreshSparks];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.uiActive = YES;
+    if (self.streamDirty) {
+        self.streamDirty = NO;
+        NSInteger count = self.messages.count;
+        if (count > 0) {
+            [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:count - 1 inSection:0]]];
+        }
+    }
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    self.uiActive = NO;
+    // Do not leave a half-updated table behind when a modal/push cancels
+    // streaming-driven reloads; the next appearance catches up.
+    [self cancelScheduledStreamFlush];
 }
 
 - (void)dealloc {
@@ -628,6 +784,244 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     } else {
         self.title = name;
     }
+}
+
+- (void)applyChatAppearance {
+    LumiChatAppearance *appearance = [LumiChatAppearance sharedAppearance];
+    self.view.backgroundColor = appearance.chatBackgroundColor;
+    self.tableView.backgroundColor = appearance.chatBackgroundColor;
+    self.inputBar.backgroundColor = appearance.inputBarColor;
+    self.inputField.tintColor = appearance.boldColor;
+    self.inputField.textColor = appearance.characterTextColor;
+    self.inputField.backgroundColor = appearance.characterBubbleColor;
+    self.sendButton.backgroundColor = appearance.boldColor;
+    self.spinner.color = appearance.boldColor;
+    self.navigationItem.rightBarButtonItem.tintColor = appearance.boldColor;
+    [self safeReloadTable];
+}
+
+- (void)infoTapped {
+    LumiChatInfoViewController *controller = [[LumiChatInfoViewController alloc] initWithChat:self.chat
+                                                                                        item:self.chatItem
+                                                                                        kind:self.chatKind];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
+- (void)presentImageURL:(NSString *)urlString title:(NSString *)title {
+    if (!urlString.length) {
+        return;
+    }
+    LumiImageViewerViewController *viewer = [[LumiImageViewerViewController alloc] initWithImageURL:urlString title:title];
+    [self presentViewController:viewer animated:YES completion:nil];
+}
+
+- (void)registerCastMembersFrom:(id)container {
+    NSDictionary *dictionary = LumiAsDictionary(container);
+    if (!dictionary) {
+        return;
+    }
+    if (!self.speakerIndex) {
+        self.speakerIndex = [NSMutableDictionary dictionary];
+    }
+    NSArray *cast = LumiAsArray(dictionary[@"cast_members"]) ?: LumiAsArray(dictionary[@"cast"]);
+    for (id member in cast) {
+        NSDictionary *entry = LumiAsDictionary(member);
+        NSString *name = LumiSpeakerKey(LumiAsString(LumiValue(entry, @"name")));
+        if (!name.length) {
+            continue;
+        }
+        NSString *avatar = LumiAsString(LumiValue(entry, @"avatar_url"));
+        NSMutableDictionary *record = [NSMutableDictionary dictionary];
+        record[@"name"] = name;
+        if (avatar.length) {
+            record[@"avatar_url"] = avatar;
+        }
+        NSString *descriptionText = LumiAsString(LumiValue(entry, @"description"));
+        if (descriptionText.length) {
+            record[@"description"] = descriptionText;
+        }
+        NSString *identifier = LumiAsString(LumiValue(entry, @"id"));
+        if (identifier.length) {
+            record[@"id"] = identifier;
+        }
+        NSDictionary *existing = self.speakerIndex[name];
+        if (!existing || avatar.length) {
+            self.speakerIndex[name] = record;
+        }
+    }
+    NSDictionary *target = LumiAsDictionary(LumiValue(dictionary, @"target"));
+    NSString *targetName = LumiSpeakerKey(LumiAsString(LumiValue(target, @"name")));
+    NSString *targetAvatar = LumiAsString(LumiValue(target, @"avatar_url"));
+    if (targetName.length && targetAvatar.length) {
+        self.speakerIndex[targetName] = @{@"name": targetName, @"avatar_url": targetAvatar};
+    }
+}
+
+- (void)buildSpeakerIndexIfNeeded {
+    if (self.speakerIndexBuilt) {
+        return;
+    }
+    self.speakerIndexBuilt = YES;
+    if (!self.speakerIndex) {
+        self.speakerIndex = [NSMutableDictionary dictionary];
+    }
+    [self registerCastMembersFrom:self.chat];
+    [self registerCastMembersFrom:self.chatItem];
+    LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    for (NSDictionary *item in store.characters) {
+        NSString *name = LumiSpeakerKey(LumiAsString(item[@"name"]));
+        if (!name.length || self.speakerIndex[name]) {
+            continue;
+        }
+        NSMutableDictionary *record = [NSMutableDictionary dictionary];
+        record[@"name"] = name;
+        NSString *avatar = LumiAsString(item[@"avatar_url"]);
+        if (avatar.length) {
+            record[@"avatar_url"] = avatar;
+        }
+        self.speakerIndex[name] = record;
+    }
+    for (NSDictionary *item in store.stories) {
+        [self registerCastMembersFrom:item];
+        NSString *title = LumiSpeakerKey(LumiAsString(item[@"title"]));
+        if (!title.length || self.speakerIndex[title]) {
+            continue;
+        }
+        NSMutableDictionary *record = [NSMutableDictionary dictionary];
+        record[@"name"] = title;
+        NSString *avatar = LumiAsString(item[@"avatar_url"]);
+        if (avatar.length) {
+            record[@"avatar_url"] = avatar;
+        }
+        self.speakerIndex[title] = record;
+    }
+}
+
+- (NSDictionary *)speakerNamed:(NSString *)name {
+    NSString *key = LumiSpeakerKey(name);
+    if (!key.length) {
+        return nil;
+    }
+    [self buildSpeakerIndexIfNeeded];
+    return self.speakerIndex[key];
+}
+
+/// Preloads avatars for every character that speaks in the loaded messages, so
+/// the inline `**Name**` chips can be drawn inline in the attributed text.
+- (void)prepareSpeakerImages {
+    [self buildSpeakerIndexIfNeeded];
+    NSMutableSet<NSString *> *names = [NSMutableSet set];
+    for (NSDictionary *message in self.messages) {
+        if ([message[@"is_user"] boolValue]) {
+            continue;
+        }
+        for (NSString *name in [LumiRichTextRenderer boldNamesInText:LumiAsString(message[@"content"])]) {
+            [names addObject:name];
+        }
+        NSString *speakerName = LumiSpeakerKey(LumiAsString(message[@"speaker_name"]));
+        if (speakerName.length) {
+            [names addObject:speakerName];
+        }
+    }
+    __weak typeof(self) weakSelf = self;
+    for (NSString *name in names) {
+        NSDictionary *speaker = [self speakerNamed:name];
+        NSString *avatar = LumiAsString(speaker[@"avatar_url"]);
+        if (!avatar.length) {
+            continue;
+        }
+        UIImage *cached = [[LumiImageLoader sharedLoader] cachedImageForURLString:avatar];
+        if (cached) {
+            self.speakerImages[name] = cached;
+            continue;
+        }
+        [[LumiImageLoader sharedLoader] loadURLString:avatar completion:^(UIImage *image) {
+            if (!image) {
+                // At launch the image session competes with the catalog crawl,
+                // so the first burst of portrait requests can time out. Without
+                // a retry the inline portrait stayed blank for the whole chat.
+                [self scheduleSpeakerImageRetry];
+                return;
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LumiChatViewController *strongSelf = weakSelf;
+                if (!strongSelf) {
+                    return;
+                }
+                strongSelf.speakerImages[name] = image;
+                [strongSelf scheduleSpeakerReload];
+            });
+        }];
+    }
+}
+
+- (void)scheduleSpeakerImageRetry {
+    if (self.speakerImageRetryScheduled || self.speakerImageRetryRounds >= 3) {
+        return;
+    }
+    self.speakerImageRetryScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        LumiChatViewController *strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        strongSelf.speakerImageRetryScheduled = NO;
+        strongSelf.speakerImageRetryRounds += 1;
+        [strongSelf prepareSpeakerImages];
+    });
+}
+
+- (void)scheduleSpeakerReload {
+    if (self.speakerReloadScheduled) {
+        return;
+    }
+    self.speakerReloadScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        LumiChatViewController *strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        strongSelf.speakerReloadScheduled = NO;
+        [strongSelf safeReloadTable];
+    });
+}
+
+/// Story chats only carry the cast list in the story detail payload, so fetch
+/// it once to learn every `**Name**` portrait for the inline chips.
+- (void)loadSpeakerDetails {
+    NSString *identifier = LumiAsString(self.chatItem[@"id"]);
+    if (!identifier.length) {
+        NSDictionary *target = LumiAsDictionary(LumiValue(self.chat, @"target"));
+        identifier = LumiAsString(LumiValue(target, @"id"));
+    }
+    if (!identifier.length) {
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    LumiAPICompletion completion = ^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        NSDictionary *detail = LumiAsDictionary(result);
+        if (!strongSelf || !detail) {
+            return;
+        }
+        [strongSelf registerCastMembersFrom:detail];
+        [strongSelf prepareSpeakerImages];
+        [strongSelf safeReloadTable];
+    };
+    if (self.chatKind == LumiDetailKindStory) {
+        [[LumiAPI sharedClient] fetchStoryWithID:identifier completion:completion];
+    } else {
+        [[LumiAPI sharedClient] fetchCharacterWithID:identifier completion:completion];
+    }
+}
+
+- (void)catalogUpdated {
+    self.speakerIndex = nil;
+    self.speakerIndexBuilt = NO;
+    [self.speakerImages removeAllObjects];
+    [self safeReloadTable];
 }
 
 #pragma mark - Chat parsing
@@ -704,7 +1098,10 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
             return;
         }
         [weakSelf sortAndReload];
-        [[LumiAPI sharedClient] markChatRead:weakSelf.chatID];
+        if (!weakSelf.readMarked) {
+            weakSelf.readMarked = YES;
+            [[LumiAPI sharedClient] markChatRead:weakSelf.chatID];
+        }
     }];
 }
 
@@ -728,6 +1125,9 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     if (avatar.length) {
         self.avatarURL = avatar;
     }
+    // Story payloads carry the cast list; registering it makes `**Имя**`
+    // speakers resolve to their own portraits instead of the story cover.
+    [self registerCastMembersFrom:chat];
 }
 
 - (void)applyMessages:(NSArray *)rawMessages {
@@ -787,9 +1187,34 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     if (isUserFlag) {
         isUser = isUserFlag.boolValue;
     }
+
+    NSString *avatar = LumiAsString(LumiValue(message, @"avatar_url"))
+        ?: LumiAsString(LumiValue(message, @"character_avatar_url"))
+        ?: LumiAsString(LumiValue(message, @"speaker_avatar_url"));
+    NSString *speakerName = LumiAsString(LumiValue(message, @"character_name"))
+        ?: LumiAsString(LumiValue(message, @"speaker_name"));
+    for (NSString *key in @[@"character", @"speaker", @"persona", @"target"]) {
+        NSDictionary *nested = LumiAsDictionary(LumiValue(message, key));
+        if (!nested) {
+            continue;
+        }
+        if (!avatar.length) {
+            avatar = LumiAsString(LumiValue(nested, @"avatar_url"));
+        }
+        if (!speakerName.length) {
+            speakerName = LumiAsString(LumiValue(nested, @"name"));
+        }
+    }
+
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
     result[@"content"] = content;
     result[@"is_user"] = @(isUser);
+    if (avatar.length) {
+        result[@"avatar_url"] = avatar;
+    }
+    if (speakerName.length) {
+        result[@"speaker_name"] = speakerName;
+    }
     NSString *identifier = LumiStringValue(LumiValue(message, @"id"));
     if (identifier.length) {
         result[@"id"] = identifier;
@@ -841,10 +1266,12 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         NSDictionary *right = LumiAsDictionary(rightObject);
         return LumiCompareDates(LumiValue(left, @"created_at"), LumiValue(right, @"created_at"));
     }];
+    [self prepareSpeakerImages];
     [self safeReloadTable];
     self.stateLabel.text = self.messages.count ? nil : @"Напишите первое сообщение";
     [self scrollToBottomAnimated:NO];
-    if (self.messages.count) {
+    if (self.messages.count && !self.readMarked) {
+        self.readMarked = YES;
         [[LumiAPI sharedClient] markChatRead:self.chatID];
     }
 }
@@ -906,6 +1333,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     }
     self.inputField.text = @"";
     self.sending = YES;
+    self.readMarked = NO;
     self.sendButton.enabled = NO;
     self.sendButton.alpha = 0.5;
 
@@ -935,6 +1363,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 
 - (void)handleStreamEvent:(NSString *)type payload:(NSDictionary *)payload {
     if ([type isEqualToString:@"user_message"] || [type isEqualToString:@"user_message_updated"]) {
+        [self cancelScheduledStreamFlush];
         NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (normalized) {
@@ -958,14 +1387,24 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
                 NSString *existing = LumiAsString(assistant[@"content"]) ?: @"";
                 NSString *combined = [existing stringByAppendingString:content];
                 assistant[@"content"] = combined;
-                NSArray *photos = LumiPhotoURLsInMessage(@{}, combined);
-                assistant[@"photo_urls"] = photos.count ? photos : nil;
-                [self reloadLastRows];
+                // Rescanning megabytes of Markdown for image tags on every token
+                // was burning the main thread. Cheap pre-check first.
+                BOOL maybeHasPhoto = [combined rangeOfString:@"[photo]" options:NSCaseInsensitiveSearch].location != NSNotFound
+                    || [content rangeOfString:@"http" options:NSCaseInsensitiveSearch].location != NSNotFound
+                    || [content rangeOfString:@"]("].location != NSNotFound;
+                if (maybeHasPhoto) {
+                    NSArray *photos = LumiPhotoURLsInMessage(@{}, combined);
+                    if (photos.count) {
+                        assistant[@"photo_urls"] = photos;
+                    }
+                }
+                [self scheduleStreamFlush];
             }
         }
         return;
     }
     if ([type isEqualToString:@"intro_message"]) {
+        [self cancelScheduledStreamFlush];
         NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (normalized) {
@@ -976,6 +1415,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         return;
     }
     if ([type isEqualToString:@"done"]) {
+        [self cancelScheduledStreamFlush];
         NSDictionary *message = LumiAsDictionary(LumiValue(payload, @"message")) ?: payload;
         NSMutableDictionary *normalized = [self normalizedMessage:message];
         if (!normalized) {
@@ -985,6 +1425,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
         normalized[@"active_variant_index"] = @0;
         normalized[@"variants_count"] = @1;
         NSMutableDictionary *assistant = [self pendingAssistantMessage];
+        NSInteger reloadRow = -1;
         if (assistant) {
             if (![LumiAsString(normalized[@"content"]) length] && [LumiAsString(assistant[@"content"]) length]) {
                 normalized[@"content"] = assistant[@"content"];
@@ -995,13 +1436,20 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
             NSUInteger index = [self.messages indexOfObjectIdenticalTo:assistant];
             if (index != NSNotFound) {
                 [self.messages replaceObjectAtIndex:index withObject:normalized];
+                reloadRow = (NSInteger)index;
             } else {
                 [self.messages addObject:normalized];
             }
         } else {
             [self.messages addObject:normalized];
         }
-        [self reloadAllRows];
+        if (reloadRow == (NSInteger)self.messages.count - 1) {
+            // Streaming already painted this bubble; a full reload would make the
+            // whole list re-layout and jump.
+            [self reloadLastRows];
+        } else {
+            [self reloadAllRows];
+        }
         [self scrollToBottomAnimated:YES];
         return;
     }
@@ -1032,13 +1480,61 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
     if (count <= 0) {
         return;
     }
-    NSMutableSet *paths = [NSMutableSet set];
-    [paths addObject:[NSIndexPath indexPathForRow:count - 1 inSection:0]];
-    if (count >= 2) {
-        [paths addObject:[NSIndexPath indexPathForRow:count - 2 inSection:0]];
+    // While the user reads history (or is on another screen), keep mutating the
+    // model but leave the table alone: re-laying out a growing bubble off-screen
+    // is pure waste.
+    if (!self.uiActive || ![self isNearBottom]) {
+        self.streamDirty = YES;
+        return;
     }
-    [self safeReloadRows:paths];
+    self.streamDirty = NO;
+    [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:count - 1 inSection:0]]];
     [self scrollToBottomAnimated:NO];
+}
+
+/// Coalesces per-token stream deltas into ~12 UI updates per second.
+- (void)scheduleStreamFlush {
+    if (self.streamFlushScheduled) {
+        return;
+    }
+    self.streamFlushScheduled = YES;
+    NSUInteger token = self.streamFlushToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        LumiChatViewController *strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        if (token != strongSelf.streamFlushToken) {
+            return;
+        }
+        strongSelf.streamFlushScheduled = NO;
+        [strongSelf reloadLastRows];
+    });
+}
+
+- (void)cancelScheduledStreamFlush {
+    self.streamFlushToken += 1;
+    self.streamFlushScheduled = NO;
+}
+
+- (BOOL)isNearBottom {
+    UIScrollView *scrollView = self.tableView;
+    if (scrollView.bounds.size.height <= 0.0) {
+        return YES;
+    }
+    CGFloat visibleBottom = scrollView.contentOffset.y + scrollView.bounds.size.height - scrollView.contentInset.bottom;
+    return visibleBottom >= scrollView.contentSize.height - 160.0;
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (self.streamDirty && scrollView == self.tableView && [self isNearBottom]) {
+        self.streamDirty = NO;
+        NSInteger count = self.messages.count;
+        if (count > 0) {
+            [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:count - 1 inSection:0]]];
+        }
+    }
 }
 
 /// Row-count-safe reload used while streaming: any mismatch is resolved by a
@@ -1092,6 +1588,7 @@ static NSArray<NSString *> *LumiPhotoURLsInMessage(NSDictionary *message, NSStri
 }
 
 - (void)finishStreamingWithError:(NSError *)error {
+    [self cancelScheduledStreamFlush];
     self.sending = NO;
     self.sendButton.enabled = YES;
     self.sendButton.alpha = 1.0;
@@ -1289,6 +1786,43 @@ static const NSInteger kLumiPhotoSparkCost = 10;
             [weakSelf regenerateMessageWithID:messageID];
         }]];
     }
+
+    // Удалить сообщение
+    if (messageID.length && !pending) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Удалить сообщение"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *action) {
+            [weakSelf deleteMessageWithID:messageID atRow:row];
+        }]];
+    }
+
+    // Новый чат от этого сообщения (fork)
+    if (messageID.length && !pending) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Новый чат от этого сообщения"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+            [weakSelf forkChatFromMessageID:messageID];
+        }]];
+    }
+
+    // Продолжить диалог (персонаж отвечает без сообщения пользователя)
+    if (!isUser && !pending && !self.sending && !self.loading) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Продолжить диалог"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+            [weakSelf continueDialog];
+        }]];
+    }
+
+    // Новый чат с тем же персонажем
+    if (!self.sending && !self.loading) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Новый чат с этим персонажем"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+            [weakSelf startNewChatWithSameCharacter];
+        }]];
+    }
+
     if (content.length) {
         [sheet addAction:[UIAlertAction actionWithTitle:@"Копировать"
                                                   style:UIAlertActionStyleDefault
@@ -1476,7 +2010,9 @@ static const NSInteger kLumiPhotoSparkCost = 10;
     NSArray *photos = LumiPhotoURLsInMessage(@{}, content);
     message[@"photo_urls"] = photos.count ? photos : nil;
     message[@"pending"] = @NO;
-    [self reloadAllRows];
+    // Reloading the row (not just the table's heights) is what makes the new
+    // variant text and the ‹ n/m › bar appear right after a regeneration.
+    [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:(NSInteger)index inSection:0]]];
     [self scrollToBottomAnimated:YES];
 }
 
@@ -1502,7 +2038,7 @@ static const NSInteger kLumiPhotoSparkCost = 10;
     message[@"content"] = variants[next];
     NSArray *photos = LumiPhotoURLsInMessage(@{}, variants[next]);
     message[@"photo_urls"] = photos.count ? photos : nil;
-    [self reloadAllRows];
+    [self safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:row inSection:0]]];
 
     __weak typeof(self) weakSelf = self;
     [[LumiAPI sharedClient] setActiveVariantIndex:next
@@ -1522,7 +2058,7 @@ static const NSInteger kLumiPhotoSparkCost = 10;
         currentMessage[@"content"] = variants[current];
         NSArray *currentPhotos = LumiPhotoURLsInMessage(@{}, variants[current]);
         currentMessage[@"photo_urls"] = currentPhotos.count ? currentPhotos : nil;
-        [weakSelf reloadAllRows];
+        [weakSelf safeReloadRows:[NSSet setWithObject:[NSIndexPath indexPathForRow:(NSInteger)index inSection:0]]];
     }];
 }
 
@@ -1564,7 +2100,9 @@ static const NSInteger kLumiPhotoSparkCost = 10;
                         pending:NO
                       photoURLs:@[]
                   variantsCount:1
-                    activeIndex:0];
+                    activeIndex:0
+                      avatarURL:@""
+                  speakerImages:self.speakerImages];
         return cell;
     }
     NSDictionary *message = self.messages[indexPath.row];
@@ -1576,21 +2114,247 @@ static const NSInteger kLumiPhotoSparkCost = 10;
         variantsCount = MAX(variantsCount, (NSInteger)variants.count);
     }
     NSInteger activeIndex = [LumiAsNumber(message[@"active_variant_index"]) integerValue];
+    NSString *avatarURL = nil;
+    NSString *speakerName = nil;
+    if (!isUser) {
+        avatarURL = LumiStringValue(message[@"avatar_url"]);
+        speakerName = LumiStringValue(message[@"speaker_name"]);
+        if (!avatarURL.length) {
+            NSString *leadingName = LumiLeadingBoldName(LumiStringValue(message[@"content"]));
+            NSDictionary *speaker = [self speakerNamed:leadingName];
+            if (speaker) {
+                avatarURL = LumiStringValue(speaker[@"avatar_url"]);
+                if (!speakerName.length) {
+                    speakerName = LumiAsString(speaker[@"name"]) ?: LumiAsString(speaker[@"title"]);
+                }
+            }
+        }
+        if (!avatarURL.length) {
+            avatarURL = self.avatarURL;
+            if (!speakerName.length) {
+                speakerName = self.chatTitle;
+            }
+        }
+    }
     [cell configureWithText:LumiStringValue(message[@"content"])
                      isUser:isUser
                     pending:pending
                   photoURLs:LumiAsArray(message[@"photo_urls"]) ?: @[]
               variantsCount:variantsCount
-                activeIndex:activeIndex];
+                activeIndex:activeIndex
+                  avatarURL:avatarURL ?: @""
+              speakerImages:self.speakerImages];
     __weak typeof(self) weakSelf = self;
     NSInteger row = indexPath.row;
     cell.longPressHandler = ^{
         [weakSelf presentMessageMenuForRow:row];
     };
+    if (avatarURL.length) {
+        NSString *speaker = speakerName ?: self.chatTitle;
+        cell.avatarTapHandler = ^{
+            [weakSelf presentImageURL:avatarURL title:speaker];
+        };
+    }
     cell.variantStepHandler = ^(NSInteger delta) {
         [weakSelf stepVariantForRow:row delta:delta];
     };
     return cell;
+}
+
+#pragma mark - New Chat Actions
+
+- (void)deleteMessageWithID:(NSString *)messageID atRow:(NSInteger)row {
+    if (!messageID.length || !self.chatID.length) {
+        return;
+    }
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Удалить сообщение"
+                                                                   message:@"Это действие нельзя отменить. Сообщение будет удалено навсегда."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Удалить" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [weakSelf performDeleteMessage:messageID atRow:row];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Отмена" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)performDeleteMessage:(NSString *)messageID atRow:(NSInteger)row {
+    self.sending = YES;
+    self.sendButton.enabled = NO;
+    self.sendButton.alpha = 0.5;
+    
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] deleteMessageWithID:messageID chatID:self.chatID completion:^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        strongSelf.sending = NO;
+        strongSelf.sendButton.enabled = YES;
+        strongSelf.sendButton.alpha = 1.0;
+        
+        if (error) {
+            [LumiDiagnostics log:@"чат %@: удаление сообщения не удалось — %@", strongSelf.chatID, error.localizedDescription];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось удалить"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        // Удаляем сообщение локально
+        if (row >= 0 && row < (NSInteger)strongSelf.messages.count) {
+            [strongSelf.messages removeObjectAtIndex:row];
+            [strongSelf.tableView deleteRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:row inSection:0]]
+                                          withRowAnimation:UITableViewRowAnimationAutomatic];
+        }
+        [LumiDiagnostics log:@"чат %@: сообщение %@ удалено", strongSelf.chatID, messageID];
+    }];
+}
+
+- (void)forkChatFromMessageID:(NSString *)messageID {
+    if (!messageID.length || !self.chatID.length) {
+        return;
+    }
+    
+    // Находим сообщение и получаем его контент для контекста
+    NSDictionary *message = nil;
+    for (NSDictionary *msg in self.messages) {
+        if ([LumiStringValue(msg[@"id"]) isEqualToString:messageID]) {
+            message = msg;
+            break;
+        }
+    }
+    if (!message) return;
+    
+    NSString *content = LumiStringValue(message[@"content"]);
+    NSString *targetID = self.chat[@"target_id"] ?: self.chat[@"character_id"] ?: self.chat[@"story_id"];
+    NSString *kind = self.chat[@"target_kind"] ?: self.chat[@"kind"];
+    LumiDetailKind detailKind = ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"])
+        ? LumiDetailKindStory : LumiDetailKindCharacter;
+    NSDictionary *item = @{@"id": targetID,
+                           @"name": self.chatTitle,
+                           @"avatar_url": self.avatarURL};
+    
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] forkChatFromMessageID:messageID chatID:self.chatID completion:^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        if (error || ![result isKindOfClass:[NSDictionary class]]) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось создать чат"
+                                                                           message:error.localizedDescription ?: @"Сервер не вернул данные чата"
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        NSDictionary *chat = result[@"chat"] ?: result;
+        LumiChatViewController *controller = [[LumiChatViewController alloc] initWithChat:chat item:item kind:detailKind];
+        [strongSelf.navigationController pushViewController:controller animated:YES];
+    }];
+}
+
+- (void)continueDialog {
+    if (self.sending || self.loading || !self.chatID.length) {
+        return;
+    }
+    
+    // Отправляем пустое сообщение для триггера ответа персонажа
+    self.sending = YES;
+    self.sendButton.enabled = NO;
+    self.sendButton.alpha = 0.5;
+    self.inputField.enabled = NO;
+    
+    __weak typeof(self) weakSelf = self;
+    [[LumiAPI sharedClient] sendMessageToChatID:self.chatID
+                                         content:@""
+                                        isContinue:YES
+                                     completion:^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        strongSelf.sending = NO;
+        strongSelf.sendButton.enabled = YES;
+        strongSelf.sendButton.alpha = 1.0;
+        strongSelf.inputField.enabled = YES;
+        
+        if (error) {
+            [LumiDiagnostics log:@"чат %@: продолжение диалога не удалось — %@", strongSelf.chatID, error.localizedDescription];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось продолжить"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        // Перезагружаем сообщения
+        [strongSelf loadMessages];
+        [LumiDiagnostics log:@"чат %@: диалог продолжен", strongSelf.chatID];
+    }];
+}
+
+- (void)startNewChatWithSameCharacter {
+    if (!self.chatID.length) {
+        return;
+    }
+    
+    NSString *targetID = self.chat[@"target_id"] ?: self.chat[@"character_id"] ?: self.chat[@"story_id"];
+    NSString *kind = self.chat[@"target_kind"] ?: self.chat[@"kind"];
+    if (!targetID.length || !kind.length) {
+        return;
+    }
+    
+    NSDictionary *item = @{@"id": targetID,
+                           @"name": self.chatTitle,
+                           @"avatar_url": self.avatarURL};
+    
+    LumiDetailKind detailKind = ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"])
+        ? LumiDetailKindStory : LumiDetailKindCharacter;
+    
+    // Показываем индикатор загрузки
+    self.sending = YES;
+    self.sendButton.enabled = NO;
+    self.sendButton.alpha = 0.5;
+    self.inputField.enabled = NO;
+    [self.spinner startAnimating];
+    self.stateLabel.text = @"Создаю новый чат...";
+    
+    __weak typeof(self) weakSelf = self;
+    LumiAPICompletion completion = ^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        strongSelf.sending = NO;
+        strongSelf.sendButton.enabled = YES;
+        strongSelf.sendButton.alpha = 1.0;
+        strongSelf.inputField.enabled = YES;
+        [strongSelf.spinner stopAnimating];
+        strongSelf.stateLabel.text = nil;
+        
+        if (error || ![result isKindOfClass:[NSDictionary class]]) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось открыть чат"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        NSDictionary *chat = result;
+        LumiChatViewController *controller = [[LumiChatViewController alloc] initWithChat:chat item:item kind:detailKind];
+        [strongSelf.navigationController pushViewController:controller animated:YES];
+    };
+    
+    LumiAPI *api = [LumiAPI sharedClient];
+    if (detailKind == LumiDetailKindStory) {
+        [api openChatWithCharacterID:nil storyID:targetID completion:completion];
+    } else {
+        [api openChatWithCharacterID:targetID storyID:nil completion:completion];
+    }
 }
 
 @end

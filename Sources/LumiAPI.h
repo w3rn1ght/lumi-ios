@@ -53,6 +53,17 @@ extern NSString *const LumiAuthDidChangeNotification;
 
 #pragma mark - Catalog
 
+/// Cursor-paged catalog endpoints returning full card data (name, cover, tags, message_count, etc.).
+/// Endpoint: GET /characters?scope=all&fields=card&limit=100&sort=popular&cursor=...
+- (void)fetchCharacterCardsWithCursor:(nullable NSString *)cursor
+                         completion:(LumiAPICompletion)completion;
+
+/// Cursor-paged catalog endpoints returning full card data.
+/// Endpoint: GET /stories?scope=all&fields=card&limit=100&sort=popular&cursor=...
+- (void)fetchStoryCardsWithCursor:(nullable NSString *)cursor
+                     completion:(LumiAPICompletion)completion;
+
+/// Legacy ID-list + detail endpoints (kept for compatibility).
 - (void)fetchCharacterIDsWithCompletion:(LumiAPICompletion)completion;
 - (void)fetchCharacterWithID:(NSString *)characterID completion:(LumiAPICompletion)completion;
 - (void)fetchStoryIDsWithCompletion:(LumiAPICompletion)completion;
@@ -66,14 +77,29 @@ extern NSString *const LumiAuthDidChangeNotification;
 - (void)fetchCharacterCardsWithCursor:(nullable NSString *)cursor
                                 limit:(NSInteger)limit
                            completion:(LumiAPICompletion)completion;
+
 - (void)fetchStoryCardsWithCursor:(nullable NSString *)cursor
                             limit:(NSInteger)limit
+                       completion:(LumiAPICompletion)completion;
+
+/// Same as above with an explicit order (`popular` / `newest` / `oldest`).
+/// `newest` is used as a second sweep when the first one is incomplete.
+- (void)fetchCharacterCardsWithCursor:(nullable NSString *)cursor
+                                limit:(NSInteger)limit
+                                 sort:(nullable NSString *)sort
+                           completion:(LumiAPICompletion)completion;
+- (void)fetchStoryCardsWithCursor:(nullable NSString *)cursor
+                            limit:(NSInteger)limit
+                             sort:(nullable NSString *)sort
                        completion:(LumiAPICompletion)completion;
 
 #pragma mark - Chats
 
 - (void)fetchChatsWithCompletion:(LumiAPICompletion)completion;
 - (void)fetchChatWithID:(NSString *)chatID completion:(LumiAPICompletion)completion;
+/// Per-chat counters/state. Relationship and memory data live here on builds
+/// where `/chats/{id}` only returns ids.
+- (void)fetchChatStatsWithID:(NSString *)chatID completion:(LumiAPICompletion)completion;
 - (void)openChatWithCharacterID:(nullable NSString *)characterID
                         storyID:(nullable NSString *)storyID
                      completion:(LumiAPICompletion)completion;
@@ -109,6 +135,22 @@ extern NSString *const LumiAuthDidChangeNotification;
                  forMessageID:(NSString *)messageID
                        chatID:(NSString *)chatID
                    completion:(nullable LumiAPICompletion)completion;
+
+/// DELETE /chats/{chatID}/messages/{messageID}
+- (void)deleteMessageWithID:(NSString *)messageID
+                 chatID:(NSString *)chatID
+             completion:(LumiAPICompletion)completion;
+
+/// POST /chats/{chatID}/fork - создает новый чат от конкретного сообщения
+- (void)forkChatFromMessageID:(NSString *)messageID
+                    chatID:(NSString *)chatID
+                completion:(LumiAPICompletion)completion;
+
+/// Отправка сообщения с флагом continue (пустое сообщение для триггера ответа ИИ)
+- (void)sendMessageToChatID:(NSString *)chatID
+                  content:(NSString *)content
+               isContinue:(BOOL)isContinue
+            completion:(LumiAPICompletion)completion;
 
 #pragma mark - Sparks & photos
 

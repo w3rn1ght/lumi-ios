@@ -179,20 +179,22 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 }
 
 - (NSDate *)dateFromChat:(NSDictionary *)chat {
-    NSString *candidates[5];
-    NSUInteger count = 0;
-    for (NSString *key in @[@"last_message_at", @"updated_at", @"last_activity_at", @"created_at"]) {
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    for (NSString *key in @[@"last_message_at", @"last_activity_at", @"updated_at", @"created_at"]) {
         NSString *value = LumiAsString(LumiValue(chat, key));
         if (value.length) {
-            candidates[count++] = value;
+            [candidates addObject:value];
         }
     }
-    NSString *nested = LumiNestedString(chat, @"last_message", @"created_at");
-    if (nested.length) {
-        candidates[count++] = nested;
+    id lastMessage = LumiValue(chat, @"last_message") ?: LumiValue(chat, @"lastMessage");
+    for (NSString *key in @[@"created_at", @"sent_at", @"updated_at"]) {
+        NSString *value = LumiAsString(LumiValue(lastMessage, key));
+        if (value.length) {
+            [candidates addObject:value];
+        }
     }
-    for (NSUInteger index = 0; index < count; index++) {
-        NSDate *date = [self parseDate:candidates[index]];
+    for (NSString *candidate in candidates) {
+        NSDate *date = [self parseDate:candidate];
         if (date) {
             return date;
         }
@@ -201,18 +203,7 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 }
 
 - (NSDate *)parseDate:(NSString *)string {
-    static NSISO8601DateFormatter *formatter;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        formatter = [[NSISO8601DateFormatter alloc] init];
-        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
-    });
-    NSDate *date = [formatter dateFromString:string];
-    if (date) {
-        return date;
-    }
-    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime;
-    return [formatter dateFromString:string];
+    return LumiDateFromValue(string);
 }
 
 - (NSString *)relativeStringFromDate:(NSDate *)date {
@@ -235,24 +226,73 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 
 #pragma mark - Chats
 
+@interface LumiChatGroup : NSObject
+@property (nonatomic, copy) NSString *targetID;
+@property (nonatomic, copy) NSString *targetKind;
+@property (nonatomic, copy) NSString *targetName;
+@property (nonatomic, copy) NSString *avatarURL;
+@property (nonatomic, strong) NSArray<NSDictionary *> *chats;
+@property (nonatomic, assign) NSDate *lastActivityDate;
+@end
+
+@implementation LumiChatGroup
+@end
+
 @interface LumiChatsViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UIView *loginPrompt;
 @property (nonatomic, strong) UILabel *stateLabel;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
-@property (nonatomic, copy) NSArray<NSDictionary *> *chats;
+@property (nonatomic, copy) NSArray<NSDictionary *> *chats; // плоский массив для совместимости
+@property (nonatomic, strong) NSArray<LumiChatGroup *> *chatGroups; // сгруппированные чаты
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *resolvedItems;
 @property (nonatomic, assign) BOOL loading;
+- (NSDate *)parseDate:(NSString *)string;
+- (NSDate *)lastActivityDateFromChat:(NSDictionary *)chat;
+- (void)resolveMissingNames;
 @end
 
 @implementation LumiChatsViewController
+
+- (NSDate *)parseDate:(NSString *)string {
+    return LumiDateFromValue(string);
+}
+
+- (NSDate *)lastActivityDateFromChat:(NSDictionary *)chat {
+    if (![chat isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+    NSMutableArray *candidates = [NSMutableArray array];
+    for (NSString *key in @[@"last_message_at", @"last_activity_at", @"updated_at", @"created_at"]) {
+        id value = LumiValue(chat, key);
+        if (value) {
+            [candidates addObject:value];
+        }
+    }
+    id lastMessage = LumiValue(chat, @"last_message") ?: LumiValue(chat, @"lastMessage");
+    for (NSString *key in @[@"created_at", @"sent_at", @"updated_at"]) {
+        id value = LumiValue(lastMessage, key);
+        if (value) {
+            [candidates addObject:value];
+        }
+    }
+    for (id candidate in candidates) {
+        NSDate *date = LumiDateFromValue(candidate);
+        if (date) {
+            return date;
+        }
+    }
+    return nil;
+}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = LumiBackgroundColor();
     self.title = @"Чаты";
     self.chats = @[];
+    self.resolvedItems = [NSMutableDictionary dictionary];
 
-    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleGrouped];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.tableView.backgroundColor = LumiBackgroundColor();
     self.tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
@@ -310,13 +350,20 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
                                              selector:@selector(unauthorized)
                                                  name:LumiAPIDidUnauthorizedNotification
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(catalogDidUpdate)
+                                                 name:LumiCatalogDidUpdateNotification
+                                               object:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self updateLoginState];
     if ([[LumiAPI sharedClient] isAuthenticated] && !self.loading) {
-        [self loadChats];
+        LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+        if (!store.isSyncing) {
+            [self loadChats];
+        }
     }
 }
 
@@ -330,7 +377,10 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self updateLoginState];
         if ([[LumiAPI sharedClient] isAuthenticated]) {
-            [self loadChats];
+            LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+            if (!store.isSyncing) {
+                [self loadChats];
+            }
         }
     });
 }
@@ -338,6 +388,16 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
 - (void)unauthorized {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self updateLoginState];
+    });
+}
+
+- (void)catalogDidUpdate {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+        // Only reload chats when catalog sync is fully complete (not during incremental page loads)
+        if ([[LumiAPI sharedClient] isAuthenticated] && !self.loading && !store.isSyncing) {
+            [self loadChats];
+        }
     });
 }
 
@@ -435,6 +495,11 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
         [self updateLoginState];
         return;
     }
+    LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    if (store.isSyncing) {
+        [self.tableView.refreshControl endRefreshing];
+        return;
+    }
     [self loadChats];
 }
 
@@ -458,8 +523,10 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
         NSArray *items = LumiAsArray(result) ?: @[];
         [LumiDiagnostics log:@"чаты: получено %lu", (unsigned long)items.count];
         weakSelf.chats = [weakSelf sortedChats:items];
+        weakSelf.chatGroups = [weakSelf groupedChats:weakSelf.chats];
         weakSelf.stateLabel.text = weakSelf.chats.count ? nil : @"Чатов пока нет. Откройте каталог и начните общение.";
         [weakSelf.tableView reloadData];
+        [weakSelf resolveMissingNames];
     }];
 }
 
@@ -473,13 +540,122 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     return [valid sortedArrayUsingComparator:^NSComparisonResult(id leftObject, id rightObject) {
         NSDictionary *left = LumiAsDictionary(leftObject);
         NSDictionary *right = LumiAsDictionary(rightObject);
-        id leftDate = nil;
-        id rightDate = nil;
-        for (NSString *key in @[@"last_message_at", @"updated_at", @"created_at"]) {
-            leftDate = LumiValue(left, key) ?: leftDate;
-            rightDate = LumiValue(right, key) ?: rightDate;
+        NSDate *leftDate = [self lastActivityDateFromChat:left ?: @{}];
+        NSDate *rightDate = [self lastActivityDateFromChat:right ?: @{}];
+        if (!leftDate && !rightDate) {
+            return NSOrderedSame;
         }
-        return LumiCompareDates(rightDate, leftDate);
+        if (!leftDate) {
+            return NSOrderedDescending;
+        }
+        if (!rightDate) {
+            return NSOrderedAscending;
+        }
+        return [rightDate compare:leftDate];
+    }];
+}
+
+- (NSArray<LumiChatGroup *> *)groupedChats:(NSArray *)chats {
+    // Группируем чаты по target_id + target_kind
+    NSMutableDictionary<NSString *, NSMutableArray *> *groupsDict = [NSMutableDictionary dictionary];
+    
+    for (NSDictionary *chat in chats) {
+        NSString *targetID = LumiChatTargetIdentifier(chat);
+        NSString *kind = LumiChatKind(chat);
+        if (!targetID.length) {
+            // Never hide a chat just because the server omitted the target:
+            // keep it as its own single-chat group.
+            targetID = LumiChatIdentifier(chat);
+            if (!kind.length) {
+                kind = @"chat";
+            }
+        }
+        if (!targetID.length) {
+            continue;
+        }
+        if (!kind.length) {
+            kind = @"character";
+        }
+        NSString *groupKey = [NSString stringWithFormat:@"%@:%@", kind, targetID];
+        NSMutableArray *groupChats = groupsDict[groupKey];
+        if (!groupChats) {
+            groupChats = [NSMutableArray array];
+            groupsDict[groupKey] = groupChats;
+        }
+        [groupChats addObject:chat];
+    }
+    
+    // Создаем объекты LumiChatGroup
+    NSMutableArray<LumiChatGroup *> *groups = [NSMutableArray array];
+    LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    
+    for (NSString *groupKey in groupsDict) {
+        NSArray *groupChats = groupsDict[groupKey];
+        if (groupChats.count == 0) continue;
+        
+        // Берем первый чат для получения информации о персонаже
+        NSDictionary *firstChat = groupChats[0];
+        NSString *targetID = LumiChatTargetIdentifier(firstChat);
+        NSString *kind = LumiChatKind(firstChat);
+        if (!targetID.length) {
+            targetID = LumiChatIdentifier(firstChat);
+            if (!kind.length) {
+                kind = @"chat";
+            }
+        }
+        if (!kind.length) {
+            kind = @"character";
+        }
+        
+        // Находим имя и аватар из каталога
+        NSString *targetName = nil;
+        NSString *avatarURL = nil;
+        NSDictionary *catalogItem = [self catalogItemForChat:firstChat];
+        if (catalogItem) {
+            targetName = LumiAsString(catalogItem[@"name"]) ?: LumiAsString(catalogItem[@"title"]);
+            avatarURL = LumiAsString(catalogItem[@"avatar_url"]);
+        }
+        if (!targetName.length) {
+            targetName = LumiNestedString(firstChat, @"target", @"name");
+        }
+        if (!targetName.length) {
+            targetName = LumiAsString(firstChat[@"title"]);
+        }
+        if (!targetName.length) {
+            targetName = [kind isEqualToString:@"story"] ? @"История" : @"Персонаж";
+        }
+        if (!avatarURL.length) {
+            avatarURL = LumiNestedString(firstChat, @"target", @"avatar_url");
+        }
+        if (!avatarURL.length) {
+            avatarURL = LumiAsString(firstChat[@"avatar_url"]);
+        }
+        
+        // Находим дату последней активности в группе
+        NSDate *lastDate = nil;
+        for (NSDictionary *chat in groupChats) {
+            NSDate *date = [self lastActivityDateFromChat:chat];
+            if (date && (!lastDate || [date compare:lastDate] == NSOrderedDescending)) {
+                lastDate = date;
+            }
+        }
+        
+        LumiChatGroup *group = [[LumiChatGroup alloc] init];
+        group.targetID = targetID;
+        group.targetKind = kind;
+        group.targetName = targetName;
+        group.avatarURL = avatarURL;
+        group.chats = groupChats;
+        group.lastActivityDate = lastDate;
+        [groups addObject:group];
+    }
+    
+    // Сортируем группы по дате последней активности
+    return [groups sortedArrayUsingComparator:^NSComparisonResult(LumiChatGroup *left, LumiChatGroup *right) {
+        if (!left.lastActivityDate && !right.lastActivityDate) return NSOrderedSame;
+        if (!left.lastActivityDate) return NSOrderedDescending;
+        if (!right.lastActivityDate) return NSOrderedAscending;
+        return [right.lastActivityDate compare:left.lastActivityDate]; // DESC - новые сверху
     }];
 }
 
@@ -490,6 +666,10 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     }
     NSString *kind = LumiChatKind(chat);
     LumiCatalogStore *store = [LumiCatalogStore sharedStore];
+    NSDictionary *resolved = self.resolvedItems[targetID];
+    if (resolved) {
+        return resolved;
+    }
     if ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"]) {
         return [store storyWithID:targetID];
     }
@@ -500,24 +680,189 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     return character ?: [store storyWithID:targetID];
 }
 
+- (BOOL)isPlaceholderChatName:(NSString *)name {
+    return !name.length || [name isEqualToString:@"Персонаж"] || [name isEqualToString:@"История"];
+}
+
+/// The catalog is ~2000 cards and may still be syncing when the chat list is
+/// shown, so a group can start with a generic title. Resolve such groups from
+/// the public card endpoint (works without a session) and refresh its header.
+- (void)resolveMissingNames {
+    __weak typeof(self) weakSelf = self;
+    [self.chatGroups enumerateObjectsUsingBlock:^(LumiChatGroup *group, NSUInteger index, BOOL *stop) {
+        if (![self isPlaceholderChatName:group.targetName]) {
+            return;
+        }
+        NSString *identifier = group.targetID;
+        if (!identifier.length) {
+            return;
+        }
+        NSString *kind = group.targetKind ?: @"";
+        BOOL isStory = [kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"];
+        LumiAPICompletion completion = ^(id result, NSError *error) {
+            NSDictionary *detail = LumiAsDictionary(result);
+            NSString *name = LumiAsString(detail[@"name"]) ?: LumiAsString(detail[@"title"]);
+            if (!name.length) {
+                return;
+            }
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LumiChatGroup *target = nil;
+                if (index < strongSelf.chatGroups.count) {
+                    LumiChatGroup *candidate = strongSelf.chatGroups[index];
+                    if ([candidate.targetID isEqualToString:group.targetID]) {
+                        target = candidate;
+                    }
+                }
+                if (!target) {
+                    for (LumiChatGroup *candidate in strongSelf.chatGroups) {
+                        if ([candidate.targetID isEqualToString:group.targetID] &&
+                            [candidate.targetKind isEqualToString:group.targetKind]) {
+                            target = candidate;
+                            break;
+                        }
+                    }
+                }
+                if (!target) {
+                    return;
+                }
+                target.targetName = name;
+                NSString *avatar = LumiAsString(detail[@"avatar_url"]);
+                if (avatar.length) {
+                    target.avatarURL = avatar;
+                }
+                strongSelf.resolvedItems[target.targetID] = detail;
+                NSUInteger section = [strongSelf.chatGroups indexOfObjectIdenticalTo:target];
+                if (section != NSNotFound && section < (NSUInteger)[strongSelf numberOfSectionsInTableView:strongSelf.tableView]) {
+                    [strongSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:section]
+                                        withRowAnimation:UITableViewRowAnimationNone];
+                }
+            });
+        };
+        if (isStory) {
+            [[LumiAPI sharedClient] fetchStoryWithID:identifier completion:completion];
+        } else {
+            [[LumiAPI sharedClient] fetchCharacterWithID:identifier completion:completion];
+        }
+    }];
+}
+
 #pragma mark - Table
 
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return self.chatGroups.count;
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return self.chats.count;
+    if (section < 0 || section >= (NSInteger)self.chatGroups.count) {
+        return 0;
+    }
+    LumiChatGroup *group = self.chatGroups[section];
+    return group.chats.count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section >= (NSInteger)self.chatGroups.count) {
+        return [tableView dequeueReusableCellWithIdentifier:@"chat" forIndexPath:indexPath];
+    }
+    LumiChatGroup *group = self.chatGroups[indexPath.section];
+    if (indexPath.row >= (NSInteger)group.chats.count) {
+        return [tableView dequeueReusableCellWithIdentifier:@"chat" forIndexPath:indexPath];
+    }
     LumiSessionCell *cell = [tableView dequeueReusableCellWithIdentifier:@"chat" forIndexPath:indexPath];
-    NSDictionary *chat = self.chats[indexPath.row];
+    NSDictionary *chat = group.chats[indexPath.row];
     [cell configureWithChat:chat item:[self catalogItemForChat:chat] number:indexPath.row + 1];
     return cell;
 }
 
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    if (section >= (NSInteger)self.chatGroups.count) {
+        return nil;
+    }
+    LumiChatGroup *group = self.chatGroups[section];
+    
+    UIView *headerView = [[UIView alloc] init];
+    headerView.backgroundColor = LumiBackgroundColor();
+    
+    UIImageView *avatarView = [[UIImageView alloc] init];
+    avatarView.translatesAutoresizingMaskIntoConstraints = NO;
+    avatarView.contentMode = UIViewContentModeScaleAspectFill;
+    avatarView.clipsToBounds = YES;
+    avatarView.layer.cornerRadius = 18.0;
+    avatarView.backgroundColor = LumiSurfaceColor();
+    avatarView.image = [UIImage imageNamed:@"AvatarPlaceholder"];
+    [headerView addSubview:avatarView];
+    
+    if (group.avatarURL.length) {
+        [[LumiImageLoader sharedLoader] loadURLString:group.avatarURL intoImageView:avatarView];
+    }
+    
+    UILabel *nameLabel = [[UILabel alloc] init];
+    nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    nameLabel.font = LumiFont(15.0, UIFontWeightSemibold);
+    nameLabel.textColor = LumiTextColor();
+    nameLabel.text = group.targetName;
+    [headerView addSubview:nameLabel];
+    
+    UILabel *countLabel = [[UILabel alloc] init];
+    countLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    countLabel.font = LumiFont(12.0, UIFontWeightRegular);
+    countLabel.textColor = LumiMutedColor();
+    countLabel.text = [NSString stringWithFormat:@"%lu чат%@", (unsigned long)group.chats.count, 
+                       group.chats.count == 1 ? @"" : (group.chats.count < 5 ? @"а" : @"ов")];
+    [headerView addSubview:countLabel];
+    
+    // Кнопка "Новый чат с этим персонажем" в хедере
+    UIButton *newChatButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    newChatButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [newChatButton setTitle:@"＋ Новый чат" forState:UIControlStateNormal];
+    newChatButton.titleLabel.font = LumiFont(13.0, UIFontWeightMedium);
+    [newChatButton setTitleColor:LumiAccentColor() forState:UIControlStateNormal];
+    [newChatButton addTarget:self action:@selector(newChatWithCharacterFromHeader:) forControlEvents:UIControlEventTouchUpInside];
+    newChatButton.tag = section;
+    [headerView addSubview:newChatButton];
+    
+    [NSLayoutConstraint activateConstraints:@[
+        [headerView.heightAnchor constraintEqualToConstant:56.0],
+        
+        [avatarView.leadingAnchor constraintEqualToAnchor:headerView.leadingAnchor constant:16.0],
+        [avatarView.centerYAnchor constraintEqualToAnchor:headerView.centerYAnchor],
+        [avatarView.widthAnchor constraintEqualToConstant:36.0],
+        [avatarView.heightAnchor constraintEqualToConstant:36.0],
+        
+        [nameLabel.leadingAnchor constraintEqualToAnchor:avatarView.trailingAnchor constant:12.0],
+        [nameLabel.centerYAnchor constraintEqualToAnchor:headerView.centerYAnchor constant:-8.0],
+        [nameLabel.trailingAnchor constraintEqualToAnchor:newChatButton.leadingAnchor constant:-8.0],
+        
+        [countLabel.leadingAnchor constraintEqualToAnchor:nameLabel.leadingAnchor],
+        [countLabel.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:1.0],
+        [countLabel.trailingAnchor constraintEqualToAnchor:nameLabel.trailingAnchor],
+        
+        [newChatButton.trailingAnchor constraintEqualToAnchor:headerView.trailingAnchor constant:-16.0],
+        [newChatButton.centerYAnchor constraintEqualToAnchor:headerView.centerYAnchor],
+        [newChatButton.widthAnchor constraintEqualToConstant:100.0],
+        [newChatButton.heightAnchor constraintEqualToConstant:30.0],
+    ]];
+    
+    return headerView;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    return 56.0;
+}
+
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.row >= (NSInteger)self.chats.count) {
+    if (indexPath.section >= (NSInteger)self.chatGroups.count) {
         return;
     }
-    NSDictionary *chat = LumiAsDictionary(self.chats[indexPath.row]);
+    LumiChatGroup *group = self.chatGroups[indexPath.section];
+    if (indexPath.row >= (NSInteger)group.chats.count) {
+        return;
+    }
+    NSDictionary *chat = LumiAsDictionary(group.chats[indexPath.row]);
     if (!chat) {
         return;
     }
@@ -540,31 +885,88 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
     [self.navigationController pushViewController:controller animated:YES];
 }
 
+- (void)newChatWithCharacterFromHeader:(UIButton *)sender {
+    NSInteger section = sender.tag;
+    if (section >= (NSInteger)self.chatGroups.count) {
+        return;
+    }
+    LumiChatGroup *group = self.chatGroups[section];
+    if (group.chats.count == 0) {
+        return;
+    }
+    
+    NSString *targetID = group.targetID;
+    NSString *kind = group.targetKind;
+    NSDictionary *item = @{@"id": targetID,
+                           @"name": group.targetName,
+                           @"avatar_url": group.avatarURL};
+    
+    LumiDetailKind detailKind = ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"])
+        ? LumiDetailKindStory : LumiDetailKindCharacter;
+    
+    __weak typeof(self) weakSelf = self;
+    LumiAPICompletion completion = ^(id result, NSError *error) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        
+        if (error || ![result isKindOfClass:[NSDictionary class]]) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось открыть чат"
+                                                                           message:error.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        
+        NSDictionary *chat = result;
+        LumiChatViewController *controller = [[LumiChatViewController alloc] initWithChat:chat item:item kind:detailKind];
+        [strongSelf.navigationController pushViewController:controller animated:YES];
+    };
+    
+    LumiAPI *api = [LumiAPI sharedClient];
+    if (detailKind == LumiDetailKindStory) {
+        [api openChatWithCharacterID:nil storyID:targetID completion:completion];
+    } else {
+        [api openChatWithCharacterID:targetID storyID:nil completion:completion];
+    }
+}
+
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
     trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     __weak typeof(self) weakSelf = self;
+    
+    if (indexPath.section >= (NSInteger)weakSelf.chatGroups.count) {
+        return nil;
+    }
+    LumiChatGroup *group = weakSelf.chatGroups[indexPath.section];
+    if (indexPath.row >= (NSInteger)group.chats.count) {
+        return nil;
+    }
+    NSDictionary *chat = group.chats[indexPath.row];
+    NSString *identifier = LumiChatIdentifier(chat);
+    if (![identifier isKindOfClass:[NSString class]]) {
+        return nil;
+    }
+    
     UIContextualAction *delete = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
                                                                          title:@"Удалить"
                                                                        handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
-        if (indexPath.row >= (NSInteger)weakSelf.chats.count) {
-            completionHandler(NO);
-            return;
-        }
-        NSDictionary *chat = weakSelf.chats[indexPath.row];
-        NSString *identifier = LumiChatIdentifier(chat);
-        if (![identifier isKindOfClass:[NSString class]]) {
-            completionHandler(NO);
-            return;
-        }
         [[LumiAPI sharedClient] deleteChat:identifier completion:^(id result, NSError *error) {
             if (!error) {
-                NSMutableArray *chats = [weakSelf.chats mutableCopy];
-                if (indexPath.row < (NSInteger)chats.count) {
-                    [chats removeObjectAtIndex:indexPath.row];
-                    weakSelf.chats = chats;
+                NSMutableArray *groupChats = [group.chats mutableCopy];
+                if (indexPath.row < (NSInteger)groupChats.count) {
+                    [groupChats removeObjectAtIndex:indexPath.row];
+                    group.chats = groupChats;
                     @try {
                         [weakSelf.tableView deleteRowsAtIndexPaths:@[indexPath]
                                                   withRowAnimation:UITableViewRowAnimationAutomatic];
+                        if (groupChats.count == 0) {
+                            NSMutableArray *groups = [weakSelf.chatGroups mutableCopy];
+                            [groups removeObjectAtIndex:indexPath.section];
+                            weakSelf.chatGroups = groups;
+                            [weakSelf.tableView deleteSections:[NSIndexSet indexSetWithIndex:indexPath.section]
+                                              withRowAnimation:UITableViewRowAnimationAutomatic];
+                        }
                     } @catch (NSException *exception) {
                         [weakSelf.tableView reloadData];
                     }
@@ -574,7 +976,55 @@ static NSString *LumiChatTargetIdentifier(NSDictionary *chat) {
         }];
     }];
     delete.backgroundColor = [UIColor colorWithRed:0.85 green:0.25 blue:0.30 alpha:1.0];
-    UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[delete]];
+    
+    UIContextualAction *newChat = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                          title:@"Новый чат"
+                                                                        handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+        if (indexPath.section >= (NSInteger)weakSelf.chatGroups.count) {
+            completionHandler(NO);
+            return;
+        }
+        LumiChatGroup *group = weakSelf.chatGroups[indexPath.section];
+        NSString *targetID = group.targetID;
+        NSString *kind = group.targetKind;
+        NSDictionary *item = @{@"id": targetID,
+                               @"name": group.targetName,
+                               @"avatar_url": group.avatarURL};
+        
+        LumiDetailKind detailKind = ([kind isEqualToString:@"story"] || [kind isEqualToString:@"stories"])
+            ? LumiDetailKindStory : LumiDetailKindCharacter;
+        
+        __weak typeof(weakSelf) weakSelf2 = weakSelf;
+        LumiAPICompletion completion = ^(id result, NSError *error) {
+            __strong typeof(weakSelf2) strongSelf = weakSelf2;
+            if (!strongSelf) return;
+            
+            if (error || ![result isKindOfClass:[NSDictionary class]]) {
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Не удалось открыть чат"
+                                                                               message:error.localizedDescription
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"Ок" style:UIAlertActionStyleDefault handler:nil]];
+                [strongSelf presentViewController:alert animated:YES completion:nil];
+                completionHandler(NO);
+                return;
+            }
+            
+            NSDictionary *newChatDict = result;
+            LumiChatViewController *controller = [[LumiChatViewController alloc] initWithChat:newChatDict item:item kind:detailKind];
+            [strongSelf.navigationController pushViewController:controller animated:YES];
+            completionHandler(YES);
+        };
+        
+        LumiAPI *api = [LumiAPI sharedClient];
+        if (detailKind == LumiDetailKindStory) {
+            [api openChatWithCharacterID:nil storyID:targetID completion:completion];
+        } else {
+            [api openChatWithCharacterID:targetID storyID:nil completion:completion];
+        }
+    }];
+    newChat.backgroundColor = LumiAccentColor();
+    
+    UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[delete, newChat]];
     configuration.performsFirstActionWithFullSwipe = NO;
     return configuration;
 }
